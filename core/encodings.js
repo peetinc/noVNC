@@ -23,7 +23,9 @@ export const encodings = {
     encodingArdGray16: 1001,
     encodingArdThousands: 1002,
 
+    pseudoEncodingArdCursorPos: 1100,
     pseudoEncodingArdSessionEncryption: 1103,
+    pseudoEncodingArdCursorAlpha: 1104,
 
     pseudoEncodingQualityLevel9: -23,
     pseudoEncodingQualityLevel0: -32,
@@ -59,7 +61,9 @@ export function encodingName(num) {
         case encodings.encodingArdHalftone: return "ArdHalftone";
         case encodings.encodingArdGray16: return "ArdGray16";
         case encodings.encodingArdThousands: return "ArdThousands";
+        case encodings.pseudoEncodingArdCursorPos: return "ArdCursorPos";
         case encodings.pseudoEncodingArdSessionEncryption: return "ArdSessionEncryption";
+        case encodings.pseudoEncodingArdCursorAlpha: return "ArdCursorAlpha";
         default:                         return "[unknown encoding " + num + "]";
     }
 }

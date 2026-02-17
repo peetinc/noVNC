@@ -152,6 +152,11 @@ export default class RFB extends EventTargetMixin {
         this._ardClipboardSessionId = 0;
         this._ardLastClipboardSent = null;
         this._ardLastClipboardRecv = null;
+        this._ardCursorCache = {};       // cursor image cache (id → {rgba, hotx, hoty, w, h})
+        this._ardCursorUrlCache = {};    // cursor CSS URL cache (id → css string)
+        this._ardCursorZlib = new Inflator();  // zlib for cursor data (reset per image)
+        this._ardActiveCursor = null;    // {type:'system'|'custom', id}
+        this._ardGotCursor = false;      // track if cursor data received in first FBU
         this._rfbVeNCryptState = 0;
         this._rfbXvpVer = 0;
 
@@ -2581,6 +2586,10 @@ export default class RFB extends EventTargetMixin {
         if (this._rfbAppleARD) {
             RFB.messages.pixelFormat(this._sock, this._fbDepth, true, 16, 8, 0);
             this._sendArdAutoPasteboard(1);
+            // Set default arrow cursor and track first-FBU cursor delivery
+            this._ardActiveCursor = { type: 'system', id: 0 };
+            this._setArdSystemCursor(0);
+            this._ardGotCursor = false;
         } else {
             RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
         }
@@ -2607,6 +2616,8 @@ export default class RFB extends EventTargetMixin {
             };
             const encs = presetEncodings[this._ardQualityPreset] || presetEncodings.millions;
             encs.push(encodings.pseudoEncodingDesktopSize);
+            encs.push(encodings.pseudoEncodingArdCursorAlpha);
+            encs.push(encodings.pseudoEncodingArdCursorPos);
             encs.push(encodings.pseudoEncodingCursor);
             encs.push(encodings.pseudoEncodingLastRect);
             encs.push(encodings.pseudoEncodingQEMUExtendedKeyEvent);
@@ -3022,9 +3033,11 @@ export default class RFB extends EventTargetMixin {
                 break;
             case 11:
                 Log.Info("ARD StateChange: CursorHidden");
+                this._updateCursor(new Uint8Array(4), 0, 0, 1, 1);
                 break;
             case 12:
                 Log.Info("ARD StateChange: CursorVisible");
+                this._reapplyArdCursor();
                 break;
             default:
                 Log.Info("ARD StateChange: unknown code=" + statusCode +
@@ -3212,8 +3225,19 @@ export default class RFB extends EventTargetMixin {
             case 0:  // FramebufferUpdate
                 ret = this._framebufferUpdate();
                 if (ret && !this._enabledContinuousUpdates) {
-                    RFB.messages.fbUpdateRequest(this._sock, true, 0, 0,
-                                                 this._fbWidth, this._fbHeight);
+                    // ARD: if the first FBU didn't include cursor data,
+                    // re-send SetEncodings once to prompt the server.
+                    if (this._rfbAppleARD && this._ardGotCursor === false) {
+                        Log.Info("ARD: first FBU had no cursor, " +
+                                 "re-sending SetEncodings");
+                        this._ardGotCursor = null;  // only retry once
+                        this._sendEncodings();
+                        RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                                     this._fbWidth, this._fbHeight);
+                    } else {
+                        RFB.messages.fbUpdateRequest(this._sock, true, 0, 0,
+                                                     this._fbWidth, this._fbHeight);
+                    }
                 }
                 return ret;
 
@@ -3357,6 +3381,12 @@ export default class RFB extends EventTargetMixin {
 
             case encodings.pseudoEncodingArdSessionEncryption:
                 return this._handleArdSessionEncryption();
+
+            case encodings.pseudoEncodingArdCursorPos:
+                return this._handleArdCursorPos();
+
+            case encodings.pseudoEncodingArdCursorAlpha:
+                return this._handleArdCursorAlpha();
 
             default:
                 return this._handleDataRect();
@@ -3514,6 +3544,167 @@ export default class RFB extends EventTargetMixin {
         this._updateCursor(rgba, hotx, hoty, w, h);
 
         return true;
+    }
+
+    // Encoding 1100: ArdCursorPos — remote cursor position hint.
+    // noVNC renders the cursor locally from mouse events, so this is a no-op.
+    _handleArdCursorPos() {
+        return true;
+    }
+
+    // Encoding 1104: ArdCursorAlpha
+    // Two modes distinguished by width/height:
+    //   New Cursor (w>0, h>0): defines and caches a cursor image (ID > 999)
+    //   Set Cursor (w=0, h=0): activates a cursor by ID
+    //     - ID 0-999: system cursor (no pixel data; client maps to CSS cursor)
+    //     - ID > 999: previously cached custom cursor
+    // Both carry: u32be cursorID + u32be dataSize + [dataSize bytes]
+    _handleArdCursorAlpha() {
+        this._ardGotCursor = true;
+        const hotx = this._FBU.x;
+        const hoty = this._FBU.y;
+        const w = this._FBU.width;
+        const h = this._FBU.height;
+
+        // Peek at the 8-byte header (cursorID + dataSize) before consuming
+        if (this._sock.rQwait("ArdCursor header", 8)) { return false; }
+        const hdr = this._sock.rQpeekBytes(8);
+        const cursorId = ((hdr[0] << 24) | (hdr[1] << 16) |
+                          (hdr[2] << 8)  |  hdr[3]) >>> 0;
+        const dataSize = ((hdr[4] << 24) | (hdr[5] << 16) |
+                          (hdr[6] << 8)  |  hdr[7]) >>> 0;
+
+        // Wait for complete message: 8-byte header + compressed payload
+        if (this._sock.rQwait("ArdCursor payload", 8 + dataSize)) { return false; }
+
+        // Consume the 8-byte header
+        this._sock.rQskipBytes(8);
+
+        // --- Set Cursor (w=0, h=0): activate cursor by ID ---
+        if (w === 0 && h === 0) {
+            Log.Info("ArdCursorAlpha: SetCursor id=" + cursorId +
+                     (cursorId < 1000 ? " (system)" : " (custom)") +
+                     " dataSize=" + dataSize);
+
+            if (dataSize > 0) {
+                this._sock.rQskipBytes(dataSize);
+            }
+
+            if (cursorId < 1000) {
+                this._ardActiveCursor = { type: 'system', id: cursorId };
+                this._setArdSystemCursor(cursorId);
+            } else {
+                const cachedUrl = this._ardCursorUrlCache[cursorId];
+                if (cachedUrl) {
+                    this._ardActiveCursor = { type: 'custom', id: cursorId };
+                    this._canvas.style.cursor = cachedUrl;
+                } else {
+                    const cached = this._ardCursorCache[cursorId];
+                    if (cached) {
+                        this._ardActiveCursor = { type: 'custom', id: cursorId };
+                        this._updateCursor(cached.rgba, cached.hotx, cached.hoty,
+                                           cached.w, cached.h);
+                    } else {
+                        Log.Warn("ArdCursorAlpha: SetCursor unknown id " +
+                                 cursorId + ", falling back to default arrow");
+                        this._ardActiveCursor = { type: 'system', id: 0 };
+                        this._setArdSystemCursor(0);
+                    }
+                }
+            }
+            return true;
+        }
+
+        // --- New Cursor (w>0, h>0): decompress and cache ---
+
+        if (w > 256 || h > 256) {
+            Log.Warn("ArdCursorAlpha: cursor too large (" +
+                     w + "x" + h + "), skipping");
+            this._sock.rQskipBytes(dataSize);
+            return true;
+        }
+
+        Log.Info("ArdCursorAlpha: NewCursor id=" + cursorId +
+                 " " + w + "x" + h + " hotspot=" + hotx + "," + hoty +
+                 " compressed=" + dataSize + " bytes");
+
+        // Decompress cursor data: w*h*5 bytes total
+        //   First w*h*4 bytes: pixel data in BGRX format
+        //   Last  w*h*1 bytes: separate alpha mask (8-bit per pixel)
+        const pixelCount = w * h;
+        const decompressedSize = pixelCount * 5;
+        const compressed = new Uint8Array(
+            this._sock.rQshiftBytes(dataSize, false));
+
+        this._ardCursorZlib.reset();
+        this._ardCursorZlib.setInput(compressed);
+        const decompressed = this._ardCursorZlib.inflate(decompressedSize);
+        this._ardCursorZlib.setInput(null);
+
+        // Convert BGRX + separate alpha → RGBA
+        const rgba = new Uint8Array(pixelCount * 4);
+        const alphaOffset = pixelCount * 4;
+        for (let i = 0; i < pixelCount; i++) {
+            const srcOff = i * 4;
+            const dstOff = i * 4;
+            rgba[dstOff]     = decompressed[srcOff + 2]; // R
+            rgba[dstOff + 1] = decompressed[srcOff + 1]; // G
+            rgba[dstOff + 2] = decompressed[srcOff];     // B
+            rgba[dstOff + 3] = decompressed[alphaOffset + i]; // A
+        }
+
+        // Cache and activate
+        this._ardCursorCache[cursorId] = {
+            rgba: rgba, hotx: hotx, hoty: hoty, w: w, h: h
+        };
+
+        this._ardActiveCursor = { type: 'custom', id: cursorId };
+        this._updateCursor(rgba, hotx, hoty, w, h);
+
+        // Cache the generated CSS cursor URL for fast SetCursor switching
+        this._ardCursorUrlCache[cursorId] = this._canvas.style.cursor;
+
+        return true;
+    }
+
+    // Map ARD system cursor IDs (0-999) to CSS cursor names
+    _setArdSystemCursor(cursorId) {
+        const cssCursors = {
+            0: 'default',       // Arrow
+            1: 'text',          // IBeam
+            2: 'crosshair',     // Crosshair
+            3: 'grabbing',      // ClosedHand
+            4: 'grab',          // OpenHand
+            5: 'pointer',       // PointingHand
+            6: 'w-resize',      // ResizeLeft
+            7: 'e-resize',      // ResizeRight
+            8: 'ew-resize',     // ResizeLeftRight
+        };
+
+        const cssName = cssCursors[cursorId] || 'default';
+        this._canvas.style.cursor = cssName;
+    }
+
+    // Re-apply the last known cursor after CursorVisible state change
+    _reapplyArdCursor() {
+        if (!this._ardActiveCursor) {
+            return;
+        }
+        const c = this._ardActiveCursor;
+        if (c.type === 'system') {
+            this._setArdSystemCursor(c.id);
+        } else if (c.type === 'custom') {
+            const cachedUrl = this._ardCursorUrlCache[c.id];
+            if (cachedUrl) {
+                this._canvas.style.cursor = cachedUrl;
+            } else {
+                const cached = this._ardCursorCache[c.id];
+                if (cached) {
+                    this._updateCursor(cached.rgba, cached.hotx, cached.hoty,
+                                       cached.w, cached.h);
+                }
+            }
+        }
     }
 
     _handleDesktopName() {
