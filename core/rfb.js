@@ -27,6 +27,7 @@ import XtScancode from "./input/xtscancodes.js";
 import { encodings } from "./encodings.js";
 import RSAAESAuthenticationState from "./ra2.js";
 import legacyCrypto from "./crypto/crypto.js";
+import { AES128ECB } from "./crypto/aes.js";
 
 import RawDecoder from "./decoders/raw.js";
 import CopyRectDecoder from "./decoders/copyrect.js";
@@ -136,6 +137,8 @@ export default class RFB extends EventTargetMixin {
         this._rfbMaxVersion = 3.8;
         this._rfbTightVNC = false;
         this._rfbAppleARD = false;
+        this._ardDHKey = null;
+        this._ardECBCipher = null;
         this._ardQualityPreset = 'millions';
         this._rfbVeNCryptState = 0;
         this._rfbXvpVer = 0;
@@ -502,6 +505,16 @@ export default class RFB extends EventTargetMixin {
         if (down === undefined) {
             this.sendKey(keysym, code, true);
             this.sendKey(keysym, code, false);
+            return;
+        }
+
+        // ARD servers expect keystrokes wrapped in AES-128-ECB encryption
+        if (this._rfbAppleARD && this._ardDHKey) {
+            const cipher = this._getArdECBCipher();
+            const payload = this._buildEncryptedKeyPayload(keysym || 0, down);
+            const encrypted = cipher.encrypt({ name: "AES-128-ECB" }, payload);
+            Log.Info("Sending encrypted key event (" + (down ? "down" : "up") + "): keysym " + (keysym || 0));
+            RFB.messages.encryptedEvent(this._sock, 0, encrypted);
             return;
         }
 
@@ -1833,6 +1846,27 @@ export default class RFB extends EventTargetMixin {
         return true;
     }
 
+    // ARD encrypted event helpers
+
+    _getArdECBCipher() {
+        if (!this._ardECBCipher && this._ardDHKey) {
+            this._ardECBCipher = AES128ECB.importKey(
+                this._ardDHKey, { name: "AES-128-ECB" }, false, ["encrypt"]);
+        }
+        return this._ardECBCipher;
+    }
+
+    _buildEncryptedKeyPayload(keysym, down) {
+        const buf = new Uint8Array(16);
+        buf[0] = 0xFF;
+        buf[1] = down ? 1 : 0;
+        const v = new DataView(buf.buffer);
+        v.setUint32(2, keysym, false);
+        v.setUint32(6, (performance.now() * 1000) >>> 0, false);
+        // [10-11] reserved, [12-13] keycode, [14-15] unicode — left as zeros
+        return buf;
+    }
+
     _negotiateARDAuth() {
 
         if (this._rfbCredentials.username === undefined ||
@@ -1893,6 +1927,7 @@ export default class RFB extends EventTargetMixin {
         credentials[64 + password.length] = 0;
 
         const key = await legacyCrypto.digest("MD5", sharedKey);
+        this._ardDHKey = new Uint8Array(key);
         const cipher = await legacyCrypto.importKey(
             "raw", key, { name: "AES-ECB" }, false, ["encrypt"]);
         const encrypted = await legacyCrypto.encrypt({ name: "AES-ECB" }, cipher, credentials);
@@ -3470,6 +3505,13 @@ RFB.messages = {
         sock.sQpush8(ver);
         sock.sQpush8(op);
 
+        sock.flush();
+    },
+
+    encryptedEvent(sock, flags, encryptedPayload) {
+        sock.sQpush8(0x10);              // msg-type: EncryptedEvent
+        sock.sQpush8(flags);             // flags
+        sock.sQpushBytes(encryptedPayload); // 16 bytes AES-ECB encrypted
         sock.flush();
     }
 };
