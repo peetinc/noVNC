@@ -27,7 +27,8 @@ import XtScancode from "./input/xtscancodes.js";
 import { encodings } from "./encodings.js";
 import RSAAESAuthenticationState from "./ra2.js";
 import legacyCrypto from "./crypto/crypto.js";
-import { AES128ECB } from "./crypto/aes.js";
+import { AES128ECB, AES128CBC } from "./crypto/aes.js";
+import { SHA1 } from "./crypto/sha1.js";
 
 import RawDecoder from "./decoders/raw.js";
 import CopyRectDecoder from "./decoders/copyrect.js";
@@ -139,6 +140,10 @@ export default class RFB extends EventTargetMixin {
         this._rfbAppleARD = false;
         this._ardDHKey = null;
         this._ardECBCipher = null;
+        this._ardSessionKey = null;
+        this._ardSessionIV = null;
+        this._ardPendingEncryption = false;
+        this._ardEncryptionEnabled = false;
         this._ardQualityPreset = 'millions';
         this._rfbVeNCryptState = 0;
         this._rfbXvpVer = 0;
@@ -509,7 +514,8 @@ export default class RFB extends EventTargetMixin {
         }
 
         // ARD servers expect keystrokes wrapped in AES-128-ECB encryption
-        if (this._rfbAppleARD && this._ardDHKey) {
+        // (only before stream encryption is active)
+        if (this._rfbAppleARD && this._ardDHKey && !this._ardEncryptionEnabled) {
             const cipher = this._getArdECBCipher();
             const payload = this._buildEncryptedKeyPayload(keysym || 0, down);
             const encrypted = cipher.encrypt({ name: "AES-128-ECB" }, payload);
@@ -1851,9 +1857,51 @@ export default class RFB extends EventTargetMixin {
     _getArdECBCipher() {
         if (!this._ardECBCipher && this._ardDHKey) {
             this._ardECBCipher = AES128ECB.importKey(
-                this._ardDHKey, { name: "AES-128-ECB" }, false, ["encrypt"]);
+                this._ardDHKey, { name: "AES-128-ECB" }, false, ["encrypt", "decrypt"]);
         }
         return this._ardECBCipher;
+    }
+
+    _handleArdSessionEncryption() {
+        // Encoding 1103: server sends session key/IV encrypted with DH key
+        // Payload: command(2) + version(2) + encryptedKey(16) + encryptedIV(16) = 36 bytes
+        if (this._sock.rQwait("ArdSessionEncryption", 36)) {
+            return false;
+        }
+
+        const cmdVersion = this._sock.rQshift32();  // command(2)+version(2) as u32
+        if (cmdVersion !== 1) {
+            Log.Warn("ARD: unexpected EncryptionInfo cmd/version: 0x" +
+                     cmdVersion.toString(16));
+        }
+
+        const encKey = this._sock.rQshiftBytes(16);
+        const encIV  = this._sock.rQshiftBytes(16);
+
+        // Decrypt with AES-128-ECB using auth key (DH shared secret)
+        const ecb = this._getArdECBCipher();
+        this._ardSessionKey = ecb.decrypt({ name: "AES-128-ECB" }, encKey);
+        this._ardSessionIV  = ecb.decrypt({ name: "AES-128-ECB" }, encIV);
+
+        Log.Info("ARD: received session encryption key (encoding 1103)");
+
+        // Flag for activation after current FBU completes
+        this._ardPendingEncryption = true;
+        return true;
+    }
+
+    _enableStreamEncryption() {
+        const cbc = AES128CBC.importKey(
+            this._ardSessionKey,
+            { name: "AES-128-CBC" }, false, ["encrypt", "decrypt"]);
+        this._sock.enableEncryption(cbc, SHA1, this._ardSessionIV);
+        this._ardEncryptionEnabled = true;
+        Log.Info("ARD: stream encryption enabled");
+
+        // Any data remaining in the rQ after FBU processing is encrypted
+        // server data that was buffered before encryption was enabled.
+        // Re-route it through the decryption layer.
+        this._sock.reprocessRemainingAsEncrypted();
     }
 
     _buildEncryptedKeyPayload(keysym, down) {
@@ -2312,6 +2360,12 @@ export default class RFB extends EventTargetMixin {
         this._sendEncodings();
         RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, this._fbWidth, this._fbHeight);
 
+        // Request session encryption if we have the DH key
+        if (this._ardDHKey) {
+            RFB.messages.appleSetEncryption(this._sock, 1);
+            Log.Info("ARD: sent SetEncryption(request)");
+        }
+
         this._updateConnectionState('connected');
         return true;
     }
@@ -2330,6 +2384,7 @@ export default class RFB extends EventTargetMixin {
             encs.push(encodings.pseudoEncodingLastRect);
             encs.push(encodings.pseudoEncodingQEMUExtendedKeyEvent);
             encs.push(encodings.pseudoEncodingExtendedDesktopSize);
+            encs.push(encodings.pseudoEncodingArdSessionEncryption);
             RFB.messages.clientEncodings(this._sock, encs);
             return;
         }
@@ -2774,6 +2829,16 @@ export default class RFB extends EventTargetMixin {
 
         this._display.flip();
 
+        // Activate stream encryption after the FBU that delivered the key
+        if (this._ardPendingEncryption) {
+            this._ardPendingEncryption = false;
+            RFB.messages.appleSetEncryption(this._sock, 2);  // acknowledge
+            Log.Info("ARD: sent SetEncryption(acknowledge)");
+            this._enableStreamEncryption();
+            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                         this._fbWidth, this._fbHeight);
+        }
+
         return true;  // We finished this FBU
     }
 
@@ -2809,6 +2874,9 @@ export default class RFB extends EventTargetMixin {
 
             case encodings.pseudoEncodingQEMULedEvent:
                 return this._handleLedEvent();
+
+            case encodings.pseudoEncodingArdSessionEncryption:
+                return this._handleArdSessionEncryption();
 
             default:
                 return this._handleDataRect();
@@ -3513,7 +3581,21 @@ RFB.messages = {
         sock.sQpush8(flags);             // flags
         sock.sQpushBytes(encryptedPayload); // 16 bytes AES-ECB encrypted
         sock.flush();
-    }
+    },
+
+    appleSetEncryption(sock, command) {
+        sock.sQpush8(0x12);       // msg-type: SetEncryption
+        sock.sQpush8(0x00);       // padding
+        sock.sQpush16(command);   // 1=request, 2=acknowledge
+        sock.sQpush16(1);         // level (1=all data)
+        if (command === 1) {
+            sock.sQpush16(1);     // numMethods=1
+            sock.sQpush32(1);     // method=AES-128
+        } else {
+            sock.sQpush16(0);     // numMethods=0
+        }
+        sock.flush();
+    },
 };
 
 RFB.cursors = {

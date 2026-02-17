@@ -68,6 +68,15 @@ export default class Websock {
             close: () => {},
             error: () => {}
         };
+
+        // Encryption state (ARD session encryption)
+        this._encCipher = null;     // AES128CBC instance
+        this._encSha1 = null;       // SHA1 function reference
+        this._encSendSeq = 0;
+        this._encRecvSeq = 0;
+        this._encSendIV = null;
+        this._encRecvIV = null;
+        this._encRecvBuf = null;    // Uint8Array for accumulating encrypted incoming data
     }
 
     // Getters and setters
@@ -220,15 +229,92 @@ export default class Websock {
 
     flush() {
         if (this._sQlen > 0 && this.readyState === 'open') {
-            this._websocket.send(new Uint8Array(this._sQ.buffer, 0, this._sQlen));
+            if (this._encCipher) {
+                this._encryptedFlush();
+            } else {
+                this._websocket.send(new Uint8Array(this._sQ.buffer, 0, this._sQlen));
+            }
             this._sQlen = 0;
         }
+    }
+
+    _encryptedFlush() {
+        const vncData = new Uint8Array(this._sQ.buffer, 0, this._sQlen);
+        const L = vncData.length;
+
+        // totalSize = ceil16(2 + L + 20) — must be multiple of 16
+        const totalSize = Math.ceil((2 + L + 20) / 16) * 16;
+
+        // Build cleartext: [u16be(L), vncData, padding(zeros), sha1(20)]
+        const cleartext = new Uint8Array(totalSize);
+        cleartext[0] = (L >> 8) & 0xff;
+        cleartext[1] = L & 0xff;
+        cleartext.set(vncData, 2);
+        // Padding bytes already zero from Uint8Array constructor
+
+        // SHA-1 input: u32be(sendSeq) || cleartext[0..totalSize-21]
+        const shaInputLen = 4 + (totalSize - 20);
+        const shaInput = new Uint8Array(shaInputLen);
+        const sv = new DataView(shaInput.buffer);
+        sv.setUint32(0, this._encSendSeq, false);
+        shaInput.set(cleartext.subarray(0, totalSize - 20), 4);
+
+        const hash = this._encSha1(shaInput);
+        cleartext.set(hash, totalSize - 20);
+
+        // AES-CBC encrypt (IV chains across packets)
+        const ciphertext = this._encCipher.encrypt(
+            { name: "AES-128-CBC", iv: this._encSendIV }, cleartext);
+        // Update send IV to last ciphertext block for next packet
+        this._encSendIV = ciphertext.slice(ciphertext.length - 16);
+
+        // Send: [u16be(totalSize), ciphertext]
+        const packet = new Uint8Array(2 + totalSize);
+        packet[0] = (totalSize >> 8) & 0xff;
+        packet[1] = totalSize & 0xff;
+        packet.set(ciphertext, 2);
+
+        this._websocket.send(packet);
+        this._encSendSeq++;
     }
 
     _sQensureSpace(bytes) {
         if (this._sQbufferSize - this._sQlen < bytes) {
             this.flush();
         }
+    }
+
+    // Encryption
+
+    enableEncryption(cbcCipher, sha1Fn, iv) {
+        this._encCipher = cbcCipher;
+        this._encSha1 = sha1Fn;
+        this._encSendIV = new Uint8Array(iv);  // CBC IV, chains across packets
+        this._encRecvIV = new Uint8Array(iv);
+        this._encSendSeq = 0;
+        this._encRecvSeq = 0;
+        this._encRecvBuf = new Uint8Array(0);
+    }
+
+    // After enabling encryption, any remaining data in the rQ was received
+    // before encryption was enabled but is actually encrypted server data.
+    // Extract it and feed through the decryption path (without triggering
+    // the message handler, since we're already inside it).
+    reprocessRemainingAsEncrypted() {
+        if (!this._encCipher) { return; }
+        const remaining = this._rQlen - this._rQi;
+        if (remaining <= 0) { return; }
+
+        Log.Info("Reprocessing " + remaining +
+                 " remaining rQ bytes as encrypted data");
+
+        // Take the data out of the rQ
+        const data = this._rQ.slice(this._rQi, this._rQlen);
+        this._rQi = 0;
+        this._rQlen = 0;
+
+        // Feed through decryption, placing plaintext back into rQ
+        this._decryptAppend(data);
     }
 
     // Event handlers
@@ -347,6 +433,11 @@ export default class Websock {
 
     // push arraybuffer values onto the end of the receive que
     _recvMessage(e) {
+        if (this._encCipher) {
+            this._encryptedRecv(new Uint8Array(e.data));
+            return;
+        }
+
         if (this._rQlen == this._rQi) {
             // All data has now been processed, this means we
             // can reset the receive queue.
@@ -365,5 +456,102 @@ export default class Websock {
         } else {
             Log.Debug("Ignoring empty message");
         }
+    }
+
+    _encryptedRecv(incoming) {
+        const anyDecrypted = this._decryptAppend(incoming);
+
+        if (anyDecrypted && this._rQlen - this._rQi > 0) {
+            this._eventHandlers.message();
+        }
+    }
+
+    // Core decryption logic: accumulate encrypted data, decrypt complete
+    // packets, and append plaintext VNC data to the rQ. Returns true if
+    // any data was decrypted.
+    _decryptAppend(incoming) {
+        // Append incoming data to accumulation buffer
+        const newBuf = new Uint8Array(this._encRecvBuf.length + incoming.length);
+        newBuf.set(this._encRecvBuf);
+        newBuf.set(incoming, this._encRecvBuf.length);
+        this._encRecvBuf = newBuf;
+
+        let anyDecrypted = false;
+
+        // Loop while buffer has complete packets
+        while (this._encRecvBuf.length >= 2) {
+            const ciphertextLen = (this._encRecvBuf[0] << 8) | this._encRecvBuf[1];
+
+            if (ciphertextLen === 0 || ciphertextLen % 16 !== 0) {
+                Log.Warn("ARD: invalid encrypted packet length " +
+                         ciphertextLen + " (first bytes: " +
+                         Array.from(this._encRecvBuf.slice(0, Math.min(8, this._encRecvBuf.length)))
+                             .map(b => b.toString(16).padStart(2, '0')).join(' ') + ")");
+                break;
+            }
+
+            if (this._encRecvBuf.length < 2 + ciphertextLen) {
+                break;  // Wait for more data
+            }
+
+            // Extract ciphertext
+            const ciphertext = this._encRecvBuf.slice(2, 2 + ciphertextLen);
+
+            // Advance buffer
+            this._encRecvBuf = this._encRecvBuf.slice(2 + ciphertextLen);
+
+            // AES-CBC decrypt (IV chains across packets)
+            const cleartext = this._encCipher.decrypt(
+                { name: "AES-128-CBC", iv: this._encRecvIV }, ciphertext);
+            // Update recv IV to last ciphertext block for next packet
+            this._encRecvIV = ciphertext.slice(ciphertext.length - 16);
+
+            if (!cleartext) {
+                Log.Warn("ARD: encrypted packet decryption failed");
+                continue;
+            }
+
+            // Extract payload
+            const payloadLen = (cleartext[0] << 8) | cleartext[1];
+            const vncData = cleartext.slice(2, 2 + payloadLen);
+
+            // Verify SHA-1
+            const hashOffset = ciphertextLen - 20;
+            if (hashOffset > 2 && this._encSha1) {
+                const shaInputLen = 4 + hashOffset;
+                const shaInput = new Uint8Array(shaInputLen);
+                const sv = new DataView(shaInput.buffer);
+                sv.setUint32(0, this._encRecvSeq, false);
+                shaInput.set(cleartext.subarray(0, hashOffset), 4);
+                const computed = this._encSha1(shaInput);
+                const received = cleartext.slice(hashOffset, hashOffset + 20);
+                let match = true;
+                for (let i = 0; i < 20; i++) {
+                    if (computed[i] !== received[i]) { match = false; break; }
+                }
+                if (!match) {
+                    Log.Warn("ARD: SHA-1 mismatch on encrypted packet " +
+                             this._encRecvSeq);
+                }
+            }
+
+            this._encRecvSeq++;
+
+            // Reset rQ if all data has been consumed
+            if (this._rQlen == this._rQi) {
+                this._rQlen = 0;
+                this._rQi = 0;
+            }
+
+            // Copy VNC data into rQ
+            if (vncData.length > this._rQbufferSize - this._rQlen) {
+                this._expandCompactRQ(vncData.length);
+            }
+            this._rQ.set(vncData, this._rQlen);
+            this._rQlen += vncData.length;
+            anyDecrypted = true;
+        }
+
+        return anyDecrypted;
     }
 }

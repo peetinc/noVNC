@@ -294,6 +294,65 @@ export class AES128ECB {
     }
 }
 
+// Synchronous AES-128-CBC wrapper (no PKCS#7 padding)
+export class AES128CBC {
+    constructor() {
+        this._cipher = null;
+    }
+
+    get algorithm() {
+        return { name: "AES-128-CBC" };
+    }
+
+    static importKey(key, _algorithm, _extractable, _keyUsages) {
+        const cipher = new AES128CBC;
+        cipher._importKey(key);
+        return cipher;
+    }
+
+    _importKey(key) {
+        this._cipher = new AES128(key);
+    }
+
+    encrypt(algorithm, plaintext) {
+        const x = new Uint8Array(plaintext);
+        let iv = new Uint8Array(algorithm.iv);
+        if (x.length % 16 !== 0 || this._cipher === null) {
+            return null;
+        }
+        const n = x.length / 16;
+        for (let i = 0; i < n; i++) {
+            // XOR plaintext block with previous ciphertext (or IV)
+            const block = x.slice(i * 16, i * 16 + 16);
+            for (let j = 0; j < 16; j++) {
+                block[j] ^= iv[j];
+            }
+            iv = this._cipher.encryptBlock(block);
+            x.set(iv, i * 16);
+        }
+        return x;
+    }
+
+    decrypt(algorithm, ciphertext) {
+        const x = new Uint8Array(ciphertext);
+        let iv = new Uint8Array(algorithm.iv);
+        if (x.length % 16 !== 0 || this._cipher === null) {
+            return null;
+        }
+        const out = new Uint8Array(x.length);
+        const n = x.length / 16;
+        for (let i = 0; i < n; i++) {
+            const block = x.slice(i * 16, i * 16 + 16);
+            const dec = this._cipher.decryptBlock(block);
+            for (let j = 0; j < 16; j++) {
+                out[i * 16 + j] = dec[j] ^ iv[j];
+            }
+            iv = block;
+        }
+        return out;
+    }
+}
+
 export class AESECBCipher {
     constructor() {
         this._key = null;

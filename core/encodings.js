@@ -23,6 +23,8 @@ export const encodings = {
     encodingArdGray16: 1001,
     encodingArdThousands: 1002,
 
+    pseudoEncodingArdSessionEncryption: 1103,
+
     pseudoEncodingQualityLevel9: -23,
     pseudoEncodingQualityLevel0: -32,
     pseudoEncodingDesktopSize: -223,
@@ -57,6 +59,7 @@ export function encodingName(num) {
         case encodings.encodingArdHalftone: return "ArdHalftone";
         case encodings.encodingArdGray16: return "ArdGray16";
         case encodings.encodingArdThousands: return "ArdThousands";
+        case encodings.pseudoEncodingArdSessionEncryption: return "ArdSessionEncryption";
         default:                         return "[unknown encoding " + num + "]";
     }
 }
