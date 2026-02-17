@@ -14,6 +14,16 @@ export default class HextileDecoder {
         this._tiles = 0;
         this._lastsubencoding = 0;
         this._tileBuffer = new Uint8Array(16 * 16 * 4);
+        this.swapRedBlue = false;
+    }
+
+    _readColor(bytes) {
+        if (this.swapRedBlue) {
+            const tmp = bytes[0];
+            bytes[0] = bytes[2];
+            bytes[2] = tmp;
+        }
+        return bytes;
     }
 
     decodeRect(x, y, width, height, sock, display, depth) {
@@ -87,17 +97,22 @@ export default class HextileDecoder {
             } else if (subencoding & 0x01) {  // Raw
                 let pixels = tw * th;
                 let data = sock.rQshiftBytes(pixels * 4, false);
-                // Max sure the image is fully opaque
+                // Make sure the image is fully opaque
                 for (let i = 0;i <  pixels;i++) {
+                    if (this.swapRedBlue) {
+                        const tmp = data[i * 4];
+                        data[i * 4] = data[i * 4 + 2];
+                        data[i * 4 + 2] = tmp;
+                    }
                     data[i * 4 + 3] = 255;
                 }
                 display.blitImage(tx, ty, tw, th, data, 0);
             } else {
                 if (subencoding & 0x02) {  // Background
-                    this._background = new Uint8Array(sock.rQshiftBytes(4));
+                    this._background = this._readColor(new Uint8Array(sock.rQshiftBytes(4)));
                 }
                 if (subencoding & 0x04) {  // Foreground
-                    this._foreground = new Uint8Array(sock.rQshiftBytes(4));
+                    this._foreground = this._readColor(new Uint8Array(sock.rQshiftBytes(4)));
                 }
 
                 this._startTile(tx, ty, tw, th, this._background);
@@ -107,7 +122,7 @@ export default class HextileDecoder {
                     for (let s = 0; s < subrects; s++) {
                         let color;
                         if (subencoding & 0x10) {  // SubrectsColoured
-                            color = sock.rQshiftBytes(4);
+                            color = this._readColor(new Uint8Array(sock.rQshiftBytes(4)));
                         } else {
                             color = this._foreground;
                         }

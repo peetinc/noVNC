@@ -13,6 +13,7 @@ export default class ZlibDecoder {
     constructor() {
         this._zlib = new Inflator();
         this._length = 0;
+        this.swapRedBlue = false;
     }
 
     decodeRect(x, y, width, height, sock, display, depth) {
@@ -39,9 +40,15 @@ export default class ZlibDecoder {
         data = this._zlib.inflate(width * height * 4);
         this._zlib.setInput(null);
 
-        // Max sure the image is fully opaque
+        // Make sure the image is fully opaque, and swap R↔B if needed
         for (let i = 0; i < width * height; i++) {
-            data[i * 4 + 3] = 255;
+            const off = i * 4;
+            if (this.swapRedBlue) {
+                const tmp = data[off];
+                data[off] = data[off + 2];
+                data[off + 2] = tmp;
+            }
+            data[off + 3] = 255;
         }
 
         display.blitImage(x, y, width, height, data, 0);

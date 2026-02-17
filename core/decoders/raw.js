@@ -10,6 +10,7 @@
 export default class RawDecoder {
     constructor() {
         this._lines = 0;
+        this.swapRedBlue = false;
     }
 
     decodeRect(x, y, width, height, sock, display, depth) {
@@ -45,9 +46,15 @@ export default class RawDecoder {
                 data = newdata;
             }
 
-            // Max sure the image is fully opaque
+            // Make sure the image is fully opaque, and swap R↔B if needed
             for (let i = 0; i < width; i++) {
-                data[i * 4 + 3] = 255;
+                const off = i * 4;
+                if (this.swapRedBlue) {
+                    const tmp = data[off];
+                    data[off] = data[off + 2];
+                    data[off + 2] = tmp;
+                }
+                data[off + 3] = 255;
             }
 
             display.blitImage(x, curY, width, 1, data, 0);

@@ -18,6 +18,11 @@ export const encodings = {
     encodingJPEG: 21,
     encodingH264: 50,
 
+    // ARD zlib-based encodings
+    encodingArdHalftone: 1000,
+    encodingArdGray16: 1001,
+    encodingArdThousands: 1002,
+
     pseudoEncodingQualityLevel9: -23,
     pseudoEncodingQualityLevel0: -32,
     pseudoEncodingDesktopSize: -223,
@@ -49,6 +54,9 @@ export function encodingName(num) {
         case encodings.encodingTightPNG: return "TightPNG";
         case encodings.encodingJPEG:     return "JPEG";
         case encodings.encodingH264:     return "H.264";
+        case encodings.encodingArdHalftone: return "ArdHalftone";
+        case encodings.encodingArdGray16: return "ArdGray16";
+        case encodings.encodingArdThousands: return "ArdThousands";
         default:                         return "[unknown encoding " + num + "]";
     }
 }

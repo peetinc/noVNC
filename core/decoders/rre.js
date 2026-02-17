@@ -10,6 +10,16 @@
 export default class RREDecoder {
     constructor() {
         this._subrects = 0;
+        this.swapRedBlue = false;
+    }
+
+    _readColor(bytes) {
+        if (this.swapRedBlue) {
+            const tmp = bytes[0];
+            bytes[0] = bytes[2];
+            bytes[2] = tmp;
+        }
+        return bytes;
     }
 
     decodeRect(x, y, width, height, sock, display, depth) {
@@ -20,7 +30,7 @@ export default class RREDecoder {
 
             this._subrects = sock.rQshift32();
 
-            let color = sock.rQshiftBytes(4);  // Background
+            let color = this._readColor(sock.rQshiftBytes(4));  // Background
             display.fillRect(x, y, width, height, color);
         }
 
@@ -29,7 +39,7 @@ export default class RREDecoder {
                 return false;
             }
 
-            let color = sock.rQshiftBytes(4);
+            let color = this._readColor(sock.rQshiftBytes(4));
             let sx = sock.rQshift16();
             let sy = sock.rQshift16();
             let swidth = sock.rQshift16();

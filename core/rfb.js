@@ -38,6 +38,9 @@ import TightPNGDecoder from "./decoders/tightpng.js";
 import ZRLEDecoder from "./decoders/zrle.js";
 import JPEGDecoder from "./decoders/jpeg.js";
 import H264Decoder from "./decoders/h264.js";
+import ArdHalftoneDecoder from "./decoders/ardhalftone.js";
+import ArdGray16Decoder from "./decoders/ardgray16.js";
+import ArdThousandsDecoder from "./decoders/ardthousands.js";
 
 // How many seconds to wait for a disconnect to finish
 const DISCONNECT_TIMEOUT = 3;
@@ -132,6 +135,8 @@ export default class RFB extends EventTargetMixin {
         this._rfbVersion = 0;
         this._rfbMaxVersion = 3.8;
         this._rfbTightVNC = false;
+        this._rfbAppleARD = false;
+        this._ardQualityPreset = 'millions';
         this._rfbVeNCryptState = 0;
         this._rfbXvpVer = 0;
 
@@ -258,6 +263,9 @@ export default class RFB extends EventTargetMixin {
         this._decoders[encodings.encodingZRLE] = new ZRLEDecoder();
         this._decoders[encodings.encodingJPEG] = new JPEGDecoder();
         this._decoders[encodings.encodingH264] = new H264Decoder();
+        this._decoders[encodings.encodingArdHalftone] = new ArdHalftoneDecoder();
+        this._decoders[encodings.encodingArdGray16] = new ArdGray16Decoder();
+        this._decoders[encodings.encodingArdThousands] = new ArdThousandsDecoder();
 
         // NB: nothing that needs explicit teardown should be done
         // before this point, since this can throw an exception
@@ -397,6 +405,25 @@ export default class RFB extends EventTargetMixin {
 
         if (this._rfbConnectionState === 'connected') {
             this._sendEncodings();
+        }
+    }
+
+    get qualityPreset() { return this._ardQualityPreset; }
+    set qualityPreset(preset) {
+        const validPresets = ['halftone', 'gray', 'thousands', 'millions'];
+        if (!validPresets.includes(preset)) {
+            Log.Error("qualityPreset must be one of: " + validPresets.join(', '));
+            return;
+        }
+        if (this._ardQualityPreset === preset) {
+            return;
+        }
+        this._ardQualityPreset = preset;
+        if (this._rfbConnectionState === 'connected' && this._rfbAppleARD) {
+            this._sendEncodings();
+            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                         this._fbWidth, this._fbHeight);
+            this._sock.flush();
         }
     }
 
@@ -1519,8 +1546,16 @@ export default class RFB extends EventTargetMixin {
             case "003.007":
                 this._rfbVersion = 3.7;
                 break;
-            case "003.008":
             case "003.889":  // Apple Remote Desktop
+                this._rfbVersion = 3.8;
+                this._rfbAppleARD = true;
+                this._decoders[encodings.encodingZlib].swapRedBlue = true;
+                this._decoders[encodings.encodingRaw].swapRedBlue = true;
+                this._decoders[encodings.encodingZRLE].swapRedBlue = true;
+                this._decoders[encodings.encodingHextile].swapRedBlue = true;
+                this._decoders[encodings.encodingRRE].swapRedBlue = true;
+                break;
+            case "003.008":
             case "004.000":  // Intel AMT KVM
             case "004.001":  // RealVNC 4.6
             case "005.000":  // RealVNC 5.3
@@ -2172,6 +2207,13 @@ export default class RFB extends EventTargetMixin {
         const nameLength = this._sock.rQshift32();
         if (this._sock.rQwait('server init name', nameLength, 24)) { return false; }
         let name = this._sock.rQshiftStr(nameLength);
+
+        // ARD ServerInit name has a 22-byte binary prefix (flags + capabilities).
+        // Strip it before UTF-8 decoding.
+        if (this._rfbAppleARD && nameLength >= 22 && name.charCodeAt(0) === 0x00) {
+            name = name.substring(name.lastIndexOf('\x00') + 1);
+        }
+
         name = decodeUTF8(name, true);
 
         if (this._rfbTightVNC) {
@@ -2227,7 +2269,11 @@ export default class RFB extends EventTargetMixin {
             this._fbDepth = 8;
         }
 
-        RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
+        if (this._rfbAppleARD) {
+            RFB.messages.pixelFormat(this._sock, this._fbDepth, true, 16, 8, 0);
+        } else {
+            RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
+        }
         this._sendEncodings();
         RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, this._fbWidth, this._fbHeight);
 
@@ -2236,6 +2282,23 @@ export default class RFB extends EventTargetMixin {
     }
 
     _sendEncodings() {
+        if (this._rfbAppleARD) {
+            const presetEncodings = {
+                halftone:  [1000, 16, 6, 0],
+                gray:      [1001, 16, 6, 0],
+                thousands: [1002, 16, 6, 0],
+                millions:  [16, 6, 0],
+            };
+            const encs = presetEncodings[this._ardQualityPreset] || presetEncodings.millions;
+            encs.push(encodings.pseudoEncodingDesktopSize);
+            encs.push(encodings.pseudoEncodingCursor);
+            encs.push(encodings.pseudoEncodingLastRect);
+            encs.push(encodings.pseudoEncodingQEMUExtendedKeyEvent);
+            encs.push(encodings.pseudoEncodingExtendedDesktopSize);
+            RFB.messages.clientEncodings(this._sock, encs);
+            return;
+        }
+
         const encs = [];
 
         // In preference order
@@ -2305,7 +2368,8 @@ export default class RFB extends EventTargetMixin {
                 return this._handleSecurityReason();
 
             case 'ClientInitialisation':
-                this._sock.sQpush8(this._shared ? 1 : 0); // ClientInitialisation
+                this._sock.sQpush8(this._rfbAppleARD ? 0xc1 :
+                                   (this._shared ? 1 : 0));
                 this._sock.flush();
                 this._rfbInitState = 'ServerInitialisation';
                 return true;
@@ -3325,7 +3389,7 @@ RFB.messages = {
         sock.flush();
     },
 
-    pixelFormat(sock, depth, trueColor) {
+    pixelFormat(sock, depth, trueColor, redShift, greenShift, blueShift) {
         let bpp;
 
         if (depth > 16) {
@@ -3337,6 +3401,11 @@ RFB.messages = {
         }
 
         const bits = Math.floor(depth/3);
+
+        // Use provided shifts or default to RGB byte order
+        if (redShift === undefined) { redShift = bits * 0; }
+        if (greenShift === undefined) { greenShift = bits * 1; }
+        if (blueShift === undefined) { blueShift = bits * 2; }
 
         sock.sQpush8(0); // msg-type
 
@@ -3353,9 +3422,9 @@ RFB.messages = {
         sock.sQpush16((1 << bits) - 1); // green-max
         sock.sQpush16((1 << bits) - 1); // blue-max
 
-        sock.sQpush8(bits * 0); // red-shift
-        sock.sQpush8(bits * 1); // green-shift
-        sock.sQpush8(bits * 2); // blue-shift
+        sock.sQpush8(redShift);
+        sock.sQpush8(greenShift);
+        sock.sQpush8(blueShift);
 
         sock.sQpush8(0); // padding
         sock.sQpush8(0); // padding

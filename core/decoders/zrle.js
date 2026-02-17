@@ -19,6 +19,7 @@ export default class ZRLEDecoder {
 
         this._pixelBuffer = new Uint8Array(ZRLE_TILE_WIDTH * ZRLE_TILE_HEIGHT * 4);
         this._tileBuffer = new Uint8Array(ZRLE_TILE_WIDTH * ZRLE_TILE_HEIGHT * 4);
+        this.swapRedBlue = false;
     }
 
     decodeRect(x, y, width, height, sock, display, depth) {
@@ -83,11 +84,20 @@ export default class ZRLEDecoder {
     _readPixels(pixels) {
         let data = this._pixelBuffer;
         const buffer = this._inflator.inflate(3*pixels);
-        for (let i = 0, j = 0; i < pixels*4; i += 4, j += 3) {
-            data[i]     = buffer[j];
-            data[i + 1] = buffer[j + 1];
-            data[i + 2] = buffer[j + 2];
-            data[i + 3] = 255;  // Add the Alpha
+        if (this.swapRedBlue) {
+            for (let i = 0, j = 0; i < pixels*4; i += 4, j += 3) {
+                data[i]     = buffer[j + 2];
+                data[i + 1] = buffer[j + 1];
+                data[i + 2] = buffer[j];
+                data[i + 3] = 255;
+            }
+        } else {
+            for (let i = 0, j = 0; i < pixels*4; i += 4, j += 3) {
+                data[i]     = buffer[j];
+                data[i + 1] = buffer[j + 1];
+                data[i + 2] = buffer[j + 2];
+                data[i + 3] = 255;  // Add the Alpha
+            }
         }
         return data;
     }
