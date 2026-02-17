@@ -27,6 +27,7 @@ import XtScancode from "./input/xtscancodes.js";
 import { encodings } from "./encodings.js";
 import RSAAESAuthenticationState from "./ra2.js";
 import legacyCrypto from "./crypto/crypto.js";
+import { RSACipher } from "./crypto/rsa.js";
 import { AES128ECB, AES128CBC } from "./crypto/aes.js";
 import { SHA1 } from "./crypto/sha1.js";
 
@@ -69,6 +70,7 @@ const securityTypeTight             = 16;
 const securityTypeVeNCrypt          = 19;
 const securityTypeXVP               = 22;
 const securityTypeARD               = 30;
+const securityTypeRSATunnel         = 33;
 const securityTypeMSLogonII         = 113;
 
 // Special Tight security types
@@ -144,6 +146,8 @@ export default class RFB extends EventTargetMixin {
         this._ardSessionIV = null;
         this._ardPendingEncryption = false;
         this._ardEncryptionEnabled = false;
+        this._ardRSATunnelStage = 0;
+        this._ardRSAServerKey = null;
         this._ardQualityPreset = 'millions';
         this._rfbVeNCryptState = 0;
         this._rfbXvpVer = 0;
@@ -1616,6 +1620,7 @@ export default class RFB extends EventTargetMixin {
             securityTypeVeNCrypt,
             securityTypeXVP,
             securityTypeARD,
+            securityTypeRSATunnel,
             securityTypeMSLogonII,
             securityTypePlain,
         ];
@@ -1639,13 +1644,18 @@ export default class RFB extends EventTargetMixin {
             const types = this._sock.rQshiftBytes(numTypes);
             Log.Debug("Server security types: " + types);
 
-            // Look for a matching security type in the order that the
-            // server prefers
+            // Look for a matching security type. Prefer RSATunnel (33)
+            // over ARD DH (30) when both are offered.
             this._rfbAuthScheme = -1;
             for (let type of types) {
                 if (this._isSupportedSecurityType(type)) {
-                    this._rfbAuthScheme = type;
-                    break;
+                    if (this._rfbAuthScheme === -1) {
+                        this._rfbAuthScheme = type;
+                    }
+                    if (type === securityTypeRSATunnel) {
+                        this._rfbAuthScheme = type;
+                        break;
+                    }
                 }
             }
 
@@ -1654,7 +1664,11 @@ export default class RFB extends EventTargetMixin {
             }
 
             this._sock.sQpush8(this._rfbAuthScheme);
-            this._sock.flush();
+            // Type 33 (RSATunnel) requires the auth byte and first payload
+            // in a single TCP segment — defer flush to the handler.
+            if (this._rfbAuthScheme !== securityTypeRSATunnel) {
+                this._sock.flush();
+            }
         } else {
             // Server decides
             if (this._sock.rQwait("security scheme", 4)) { return false; }
@@ -1916,6 +1930,7 @@ export default class RFB extends EventTargetMixin {
     }
 
     _negotiateARDAuth() {
+        Log.Info("ARD (type 30) authentication");
 
         if (this._rfbCredentials.username === undefined ||
             this._rfbCredentials.password === undefined) {
@@ -1984,6 +1999,204 @@ export default class RFB extends EventTargetMixin {
         this._rfbCredentials.ardPublicKey = clientPublicKey;
 
         this._resumeAuthentication();
+    }
+
+    _negotiateRSATunnelAuth() {
+        Log.Info("RSATunnel (type 33) authentication");
+
+        // Stage 0: Check credentials
+        if (this._rfbCredentials.username === undefined ||
+            this._rfbCredentials.password === undefined) {
+            this.dispatchEvent(new CustomEvent(
+                "credentialsrequired",
+                { detail: { types: ["username", "password"] } }));
+            return false;
+        }
+
+        // Stage 3: Async results ready — send credentials
+        if (this._ardRSATunnelStage === 3) {
+            const { encryptedCreds, rsaCiphertext } = this._rfbCredentials.ardRSATunnelBlob;
+            const rsaLen = rsaCiphertext.byteLength;
+            const blobSize = 8 + 128 + 2 + rsaLen; // RSA1 header + creds + lenField + RSA ct
+
+            // Length prefix (u32 BE)
+            this._sock.sQpush32(blobSize);
+
+            // RSA1 header (8 bytes)
+            const header = new Uint8Array(8);
+            const hView = new DataView(header.buffer);
+            hView.setUint16(0, 1, true);          // version = 1 (LE)
+            hView.setUint32(2, 0x31415352, true); // magic "RSA1" (LE)
+            hView.setUint16(6, 1, false);         // sub-protocol = 1 Plain (BE)
+            this._sock.sQpushBytes(header);
+
+            // Encrypted credentials (128 bytes)
+            this._sock.sQpushBytes(new Uint8Array(encryptedCreds));
+
+            // RSA ciphertext length (u16 LE)
+            const rsaLenBuf = new Uint8Array(2);
+            new DataView(rsaLenBuf.buffer).setUint16(0, rsaLen, true);
+            this._sock.sQpushBytes(rsaLenBuf);
+
+            // RSA ciphertext
+            this._sock.sQpushBytes(new Uint8Array(rsaCiphertext));
+            this._sock.flush();
+
+            this._rfbCredentials.ardRSATunnelBlob = null;
+            this._ardRSATunnelStage = 4;
+            Log.Info("RSATunnel: sent credential blob (" + blobSize + " bytes)");
+        }
+
+        // Stage 4: Wait for RSA response
+        if (this._ardRSATunnelStage === 4) {
+            if (this._sock.rQwait("RSATunnel response", 4)) return false;
+            const responseLen = this._sock.rQshift32();
+            if (responseLen > 0) {
+                if (this._sock.rQwait("RSATunnel response body", responseLen, 4)) return false;
+                const responseData = this._sock.rQshiftBytes(responseLen);
+                if (responseData.length >= 2) {
+                    const view = new DataView(responseData.buffer, responseData.byteOffset);
+                    const status = view.getUint16(0, true);
+                    Log.Warn("RSATunnel: server response status: " + status);
+                    if (status === 81 || status === 255) {
+                        return this._fail("RSATunnel authentication denied");
+                    }
+                }
+            }
+            this._ardRSATunnelStage = 0;
+            this._rfbInitState = "SecurityResult";
+            return true;
+        }
+
+        // Stage 0/1: Request server key or use cached
+        if (this._ardRSATunnelStage === 0) {
+            const cachedKey = this._getCachedRSAKey();
+            if (cachedKey) {
+                Log.Info("RSATunnel: using cached server key");
+                this._ardRSAServerKey = cachedKey;
+                this._ardRSATunnelStage = 2;
+            } else {
+                // Send key request
+                Log.Info("RSATunnel: requesting server public key");
+
+                // [u32be 10][u16le 1][u32le RSA1][u16be 0][u16 0] = 14 bytes
+                this._sock.sQpush32(10);                // payload length (BE)
+                const req = new Uint8Array(10);
+                const rView = new DataView(req.buffer);
+                rView.setUint16(0, 1, true);            // version = 1 (LE)
+                rView.setUint32(2, 0x31415352, true);   // magic "RSA1" (LE)
+                rView.setUint16(6, 0, false);           // sub-protocol = 0 Key Request (BE)
+                rView.setUint16(8, 0, false);           // padding
+                this._sock.sQpushBytes(req);
+                this._sock.flush();
+
+                this._ardRSATunnelStage = 1;
+            }
+        }
+
+        // Stage 1: Read key response
+        if (this._ardRSATunnelStage === 1) {
+            if (this._sock.rQwait("RSATunnel key response length", 4)) return false;
+            const payloadLen = this._sock.rQshift32(); // u32 BE
+
+            if (this._sock.rQwait("RSATunnel key response", payloadLen, 4)) return false;
+            const payload = this._sock.rQshiftBytes(payloadLen);
+            const pView = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+
+            // [u16le version][u16le respType][u16be keyDataLen][DER key][0x00]
+            const keyDataLen = pView.getUint16(4, false); // BE
+            const keyData = payload.slice(6, 6 + keyDataLen);
+
+            const serverKey = RSACipher.parsePKCS1PublicKey(keyData);
+            Log.Info("RSATunnel: received server key (" + (serverKey.n.length * 8) + "-bit)");
+
+            this._ardRSAServerKey = serverKey;
+            this._cacheRSAKey(serverKey);
+            this._ardRSATunnelStage = 2;
+        }
+
+        // Stage 2: Start async credential encryption
+        if (this._ardRSATunnelStage === 2) {
+            this._negotiateRSATunnelAuthAsync(this._ardRSAServerKey);
+            return false;
+        }
+
+        return false;
+    }
+
+    async _negotiateRSATunnelAuthAsync(serverKey) {
+        try {
+            // Generate 16 random bytes — used directly as AES key
+            // (NOT MD5-hashed like Type 30)
+            const randomBytes = window.crypto.getRandomValues(new Uint8Array(16));
+            const aesKey = randomBytes.buffer;
+
+            // Store as _ardDHKey for stream encryption (encoding 1103)
+            this._ardDHKey = new Uint8Array(randomBytes);
+
+            // Pack credentials (same format as Type 30)
+            const credentials = window.crypto.getRandomValues(new Uint8Array(128));
+            const username = encodeUTF8(this._rfbCredentials.username).substring(0, 63);
+            const password = encodeUTF8(this._rfbCredentials.password).substring(0, 63);
+            for (let i = 0; i < username.length; i++) {
+                credentials[i] = username.charCodeAt(i);
+            }
+            credentials[username.length] = 0;
+            for (let i = 0; i < password.length; i++) {
+                credentials[64 + i] = password.charCodeAt(i);
+            }
+            credentials[64 + password.length] = 0;
+
+            // AES-ECB encrypt credentials
+            const aesCipher = await legacyCrypto.importKey(
+                "raw", aesKey, { name: "AES-ECB" }, false, ["encrypt"]);
+            const encryptedCreds = await legacyCrypto.encrypt(
+                { name: "AES-ECB" }, aesCipher, credentials);
+
+            // RSA-PKCS1v1.5 encrypt the random bytes
+            const n = serverKey.n;
+            const e = new Uint8Array(n.length);
+            e.set(serverKey.e, n.length - serverKey.e.length);
+            const rsaCipher = await legacyCrypto.importKey(
+                "raw", { n, e }, { name: "RSA-PKCS1-v1_5" }, false, ["encrypt"]);
+            const rsaCiphertext = await legacyCrypto.encrypt(
+                { name: "RSA-PKCS1-v1_5" }, rsaCipher, randomBytes);
+
+            // Store results for sync re-entry
+            this._rfbCredentials.ardRSATunnelBlob = { encryptedCreds, rsaCiphertext };
+            this._ardRSATunnelStage = 3;
+            this._resumeAuthentication();
+        } catch (e) {
+            Log.Error("RSATunnel async error: " + e.message + "\n" + e.stack);
+            this._fail("RSATunnel auth error: " + e.message);
+        }
+    }
+
+    _getCachedRSAKey() {
+        if (!this._url) return null;
+        try {
+            const stored = localStorage.getItem('noVNC_rsaKey_' + this._url);
+            if (!stored) return null;
+            const parsed = JSON.parse(stored);
+            return {
+                n: new Uint8Array(parsed.n),
+                e: new Uint8Array(parsed.e)
+            };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _cacheRSAKey(keyObj) {
+        if (!this._url) return;
+        try {
+            localStorage.setItem('noVNC_rsaKey_' + this._url, JSON.stringify({
+                n: Array.from(keyObj.n),
+                e: Array.from(keyObj.e)
+            }));
+        } catch (e) {
+            Log.Warn("Failed to cache RSA key: " + e);
+        }
     }
 
     _negotiateTightUnixAuth() {
@@ -2209,6 +2422,9 @@ export default class RFB extends EventTargetMixin {
 
             case securityTypeARD:
                 return this._negotiateARDAuth();
+
+            case securityTypeRSATunnel:
+                return this._negotiateRSATunnelAuth();
 
             case securityTypeVNCAuth:
                 return this._negotiateStdVNCAuth();
