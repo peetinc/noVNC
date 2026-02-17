@@ -149,6 +149,9 @@ export default class RFB extends EventTargetMixin {
         this._ardRSATunnelStage = 0;
         this._ardRSAServerKey = null;
         this._ardQualityPreset = 'millions';
+        this._ardClipboardSessionId = 0;
+        this._ardLastClipboardSent = null;
+        this._ardLastClipboardRecv = null;
         this._rfbVeNCryptState = 0;
         this._rfbXvpVer = 0;
 
@@ -556,6 +559,13 @@ export default class RFB extends EventTargetMixin {
 
     clipboardPasteFrom(text) {
         if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
+        if (text === this._ardLastClipboardSent) { return; }
+        this._ardLastClipboardSent = text;
+
+        if (this._rfbAppleARD) {
+            this._sendArdClipboard(text);
+            return;
+        }
 
         if (this._clipboardServerCapabilitiesFormats[extendedClipboardFormatText] &&
             this._clipboardServerCapabilitiesActions[extendedClipboardActionNotify]) {
@@ -2570,6 +2580,7 @@ export default class RFB extends EventTargetMixin {
 
         if (this._rfbAppleARD) {
             RFB.messages.pixelFormat(this._sock, this._fbDepth, true, 16, 8, 0);
+            this._sendArdAutoPasteboard(1);
         } else {
             RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
         }
@@ -2941,6 +2952,253 @@ export default class RFB extends EventTargetMixin {
         return true;
     }
 
+    // ARD AutoPasteboard (0x15) — subscribe to clipboard notifications
+    _sendArdAutoPasteboard(command) {
+        this._sock.sQpush8(0x15);       // message type
+        this._sock.sQpush8(0x00);       // padding
+        this._sock.sQpush16(command);   // command (1=enable, 0=disable)
+        this._sock.sQpush32(0);         // reserved
+        // Don't flush here — batch with SetEncodings
+        Log.Info("ARD: queued AutoPasteboard(" + command + ")");
+    }
+
+    // ARD StateChange (0x14)
+    // Wire: [pad 1][size u16be][flags u16][statusCode u16][extra...]
+    _handleArdStateChange() {
+        if (this._sock.rQwait("ArdStateChange header", 3)) { return false; }
+
+        const rQ = this._sock.rQpeekBytes(3);
+        const size = (rQ[1] << 8) | rQ[2];
+
+        if (this._sock.rQwait("ArdStateChange full", 3 + size)) { return false; }
+
+        this._sock.rQskipBytes(3); // padding + size
+        if (size < 4) {
+            if (size > 0) {
+                this._sock.rQskipBytes(size);
+            }
+            return true;
+        }
+
+        const flags = this._sock.rQshift16();
+        const statusCode = this._sock.rQshift16();
+
+        if (size > 4) {
+            this._sock.rQskipBytes(size - 4);
+        }
+
+        switch (statusCode) {
+            case 1:
+                Log.Info("ARD StateChange: LocalUserClosedConnection");
+                this._updateConnectionState('disconnecting');
+                break;
+            case 2: {
+                const now = Date.now();
+                if (!this._ardLastClipboardReqTime ||
+                    now - this._ardLastClipboardReqTime > 500) {
+                    Log.Debug("ARD StateChange: PasteboardChanged — requesting clipboard");
+                    this._ardLastClipboardReqTime = now;
+                    RFB.messages.ardClipboardRequest(this._sock,
+                                                     this._ardClipboardSessionId);
+                } else {
+                    Log.Debug("ARD StateChange: PasteboardChanged — throttled");
+                }
+                break;
+            }
+            case 3:
+                Log.Debug("ARD StateChange: PasteboardDataNeeded — sending clipboard");
+                if (this._ardLastClipboardSent) {
+                    this._sendArdClipboard(this._ardLastClipboardSent);
+                }
+                break;
+            case 4:
+                Log.Debug("ARD StateChange: Tickle");
+                break;
+            case 5:
+                Log.Info("ARD StateChange: DisplaySleep");
+                break;
+            case 6:
+                Log.Info("ARD StateChange: DisplayWake");
+                break;
+            case 11:
+                Log.Info("ARD StateChange: CursorHidden");
+                break;
+            case 12:
+                Log.Info("ARD StateChange: CursorVisible");
+                break;
+            default:
+                Log.Info("ARD StateChange: unknown code=" + statusCode +
+                         " flags=0x" + flags.toString(16));
+                break;
+        }
+
+        return true;
+    }
+
+    // ARD ClipboardSend (0x1f)
+    // Wire: format(1) + reserved(2) + sessionId(4) + uncompressedSize(4) +
+    //        compressedSize(4) + zlibData(compressedSize)
+    _handleArdClipboardSend() {
+        if (this._sock.rQwait("ArdClipboardSend header", 15)) { return false; }
+
+        const rQ = this._sock.rQpeekBytes(15);
+        const compressedSize = (rQ[11] << 24) | (rQ[12] << 16) |
+                               (rQ[13] << 8) | rQ[14];
+
+        if (this._sock.rQwait("ArdClipboardSend payload",
+                              15 + compressedSize)) { return false; }
+
+        const format = this._sock.rQshift8();
+        this._sock.rQskipBytes(2); // reserved
+        const sessionId = this._sock.rQshift32();
+        const uncompressedSize = this._sock.rQshift32();
+        this._sock.rQshift32(); // compressedSize (already known)
+
+        this._ardClipboardSessionId = sessionId;
+
+        Log.Info("ARD ClipboardSend: format=" + format +
+                 " session=" + sessionId +
+                 " uncompressed=" + uncompressedSize +
+                 " compressed=" + compressedSize);
+
+        if (compressedSize === 0 || uncompressedSize === 0) {
+            return true;
+        }
+
+        const zlibData = this._sock.rQshiftBytes(compressedSize);
+
+        // Fresh Inflator per message (zlib state doesn't carry over)
+        const inflator = new Inflator();
+        inflator.setInput(zlibData);
+        const decompressed = inflator.inflate(uncompressedSize);
+        inflator.setInput(null);
+
+        let text = this._parseArdPasteboard(decompressed);
+
+        if (text.length > 0 && text.charAt(text.length - 1) === "\0") {
+            text = text.slice(0, -1);
+        }
+
+        text = text.replaceAll("\r\n", "\n");
+
+        if (text === this._ardLastClipboardRecv) {
+            return true;
+        }
+        this._ardLastClipboardRecv = text;
+
+        Log.Debug("ARD ClipboardSend: received " + text.length + " chars");
+        this._writeClipboard(text);
+
+        return true;
+    }
+
+    // Parse ARD pasteboard binary format, extract plain text.
+    // Wire: [u32 numTypes] per type: [u32 nameLen][name][u32 flags]
+    //       [u32 numProps] per prop: [u32 keyLen][key][u32 valLen][val]
+    //       [u32 dataLen][data]
+    _parseArdPasteboard(data) {
+        const td = new TextDecoder('utf-8', { fatal: false });
+
+        if (data.length < 8 || data[0] !== 0 || data[1] !== 0) {
+            return td.decode(data);
+        }
+
+        try {
+            const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+            let off = 0;
+
+            const numTypes = dv.getUint32(off); off += 4;
+            if (numTypes === 0 || numTypes > 20) {
+                throw new Error("unlikely numTypes: " + numTypes);
+            }
+
+            const types = [];
+            for (let t = 0; t < numTypes; t++) {
+                const nameLen = dv.getUint32(off); off += 4;
+                if (nameLen > 256 || off + nameLen > data.length) {
+                    throw new Error("bad nameLen=" + nameLen);
+                }
+                const name = td.decode(data.slice(off, off + nameLen));
+                off += nameLen;
+
+                off += 4; // flags
+
+                const numProps = dv.getUint32(off); off += 4;
+                if (numProps > 20) throw new Error("bad numProps=" + numProps);
+                for (let p = 0; p < numProps; p++) {
+                    const keyLen = dv.getUint32(off); off += 4;
+                    if (keyLen > 256 || off + keyLen > data.length) {
+                        throw new Error("bad keyLen=" + keyLen);
+                    }
+                    off += keyLen;
+                    const valLen = dv.getUint32(off); off += 4;
+                    if (valLen > 65536 || off + valLen > data.length) {
+                        throw new Error("bad valLen=" + valLen);
+                    }
+                    off += valLen;
+                }
+
+                const dataLen = dv.getUint32(off); off += 4;
+                if (off + dataLen > data.length) {
+                    throw new Error("bad dataLen=" + dataLen);
+                }
+                types.push({ name, data: data.slice(off, off + dataLen), dataLen });
+                off += dataLen;
+            }
+
+            for (const type of types) {
+                if (type.name === 'public.utf8-plain-text' && type.dataLen > 0) {
+                    return td.decode(type.data);
+                }
+            }
+            for (const type of types) {
+                if (type.name === 'com.apple.traditional-mac-plain-text' &&
+                    type.dataLen > 0) {
+                    return td.decode(type.data);
+                }
+            }
+            Log.Debug("ARD Pasteboard: no text types in " + numTypes + " types");
+            return '';
+        } catch (e) {
+            Log.Warn("ARD Pasteboard parse failed: " + e.message);
+        }
+
+        return td.decode(data).replace(/\0/g, '');
+    }
+
+    // Build ARD pasteboard blob and send as ClipboardSend (0x1f)
+    _sendArdClipboard(text) {
+        if (!text) return;
+
+        const te = new TextEncoder();
+        const typeName = te.encode('public.utf8-plain-text');
+        const textData = te.encode(text);
+
+        // [u32 numTypes][u32 nameLen][name][u32 flags][u32 numProps][u32 dataLen][data]
+        const pbSize = 4 + (4 + typeName.length + 4 + 4 + 4 + textData.length);
+        const pb = new Uint8Array(pbSize);
+        const dv = new DataView(pb.buffer);
+        let off = 0;
+
+        dv.setUint32(off, 1); off += 4;              // numTypes = 1
+        dv.setUint32(off, typeName.length); off += 4; // nameLen
+        pb.set(typeName, off); off += typeName.length; // name
+        dv.setUint32(off, 0); off += 4;              // flags = 0
+        dv.setUint32(off, 0); off += 4;              // numProps = 0
+        dv.setUint32(off, textData.length); off += 4; // dataLen
+        pb.set(textData, off);
+
+        const deflator = new Deflator();
+        const compressed = deflator.deflate(pb);
+
+        Log.Info("ARD ClipboardSend: sending " + text.length +
+                 " chars, compressed=" + compressed.length);
+
+        RFB.messages.ardClipboardSend(
+            this._sock, this._ardClipboardSessionId,
+            pbSize, compressed);
+    }
+
     _normalMsg() {
         let msgType;
         if (this._FBU.rects > 0) {
@@ -2991,6 +3249,12 @@ export default class RFB extends EventTargetMixin {
 
             case 250:  // XVP
                 return this._handleXvpMsg();
+
+            case 0x14: // ARD StateChange
+                return this._handleArdStateChange();
+
+            case 0x1f: // ARD ClipboardSend
+                return this._handleArdClipboardSend();
 
             default:
                 this._fail("Unexpected server message (type " + msgType + ")");
@@ -3796,6 +4060,25 @@ RFB.messages = {
         sock.sQpush8(0x10);              // msg-type: EncryptedEvent
         sock.sQpush8(flags);             // flags
         sock.sQpushBytes(encryptedPayload); // 16 bytes AES-ECB encrypted
+        sock.flush();
+    },
+
+    ardClipboardRequest(sock, sessionId) {
+        sock.sQpush8(0x0b); // msg-type: ClipboardRequest
+        sock.sQpush8(0x00); // format (plain text)
+        sock.sQpush16(0);   // reserved
+        sock.sQpush32(sessionId);
+        sock.flush();
+    },
+
+    ardClipboardSend(sock, sessionId, uncompressedSize, compressedData) {
+        sock.sQpush8(0x1f);                        // msg-type: ClipboardSend
+        sock.sQpush8(0x00);                        // format (plain text)
+        sock.sQpush16(0);                          // reserved
+        sock.sQpush32(sessionId);                  // session ID
+        sock.sQpush32(uncompressedSize);            // uncompressed size
+        sock.sQpush32(compressedData.length);       // compressed size
+        sock.sQpushBytes(compressedData);           // zlib data
         sock.flush();
     },
 
