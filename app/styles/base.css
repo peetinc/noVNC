@@ -575,6 +575,49 @@ html {
     padding: 10px;
 }
 
+/* Display selector (ARD multi-display) */
+:root:not(.noVNC_connected) #noVNC_display_select_button {
+    display: none;
+}
+#noVNC_display_select_button:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+#noVNC_display_select {
+    background-color: var(--novnc-darkgrey);
+    border: none;
+    padding: 10px;
+}
+#noVNC_display_select_buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+#noVNC_display_select_buttons .noVNC_button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: transparent;
+    color: #fff;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+    box-sizing: border-box;
+}
+#noVNC_display_select_buttons .noVNC_button img {
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
+}
+#noVNC_display_select_buttons .noVNC_button.noVNC_selected {
+    border-color: rgba(255, 255, 255, 0.8);
+    background-color: rgba(255, 255, 255, 0.15);
+}
+
 /* Shutdown/Reboot */
 :root:not(.noVNC_connected) #noVNC_power_button {
     display: none;

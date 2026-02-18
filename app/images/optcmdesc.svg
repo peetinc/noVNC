@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="25" height="25" viewBox="0 0 25 25">
-  <!-- Option+Command+Esc (⌥⌘⎋) - three dots like ctrlaltdel.svg pattern -->
-  <rect x="16" y="4" width="5" height="5" rx="1" fill="#ffffff"/>
-  <rect x="4" y="16" width="5" height="5" rx="1" fill="#ffffff"/>
-  <rect x="13" y="16" width="5" height="5" rx="1" fill="#ffffff"/>
+  <!-- Option+Command+Esc (⌥⌘⎋) - three dots like ctrlaltdel.svg pattern, flipped -->
+  <rect x="4" y="4" width="5" height="5" rx="1" fill="#ffffff"/>
+  <rect x="7" y="16" width="5" height="5" rx="1" fill="#ffffff"/>
+  <rect x="16" y="16" width="5" height="5" rx="1" fill="#ffffff"/>
 </svg>

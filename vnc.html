@@ -94,6 +94,7 @@
 
         // See docs/EMBEDDING.md for a list of possible settings.
 
+        window.UI = UI;  // expose for console debugging
         UI.start({ settings: { defaults: defaults,
                                mandatory: mandatory } });
     </script>
@@ -156,6 +157,18 @@
                 <input type="image" alt="Ctrl+Alt+Del" src="app/images/ctrlaltdel.svg"
                     id="noVNC_send_ctrl_alt_del_button" class="noVNC_button"
                     title="Send Ctrl-Alt-Del">
+            </div>
+            </div>
+
+            <!-- Display selector (ARD multi-display) -->
+            <input type="image" alt="Select display" src="app/images/display-select.svg"
+                id="noVNC_display_select_button" class="noVNC_button"
+                disabled title="Select display">
+            <div class="noVNC_vcenter">
+            <div id="noVNC_display_select" class="noVNC_panel">
+                <div id="noVNC_display_select_buttons">
+                    <!-- Populated dynamically from arddisplaylist event -->
+                </div>
             </div>
             </div>
 

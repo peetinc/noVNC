@@ -120,6 +120,7 @@ const UI = {
         UI.addControlbarHandlers();
         UI.addTouchSpecificHandlers();
         UI.addExtraKeysHandlers();
+        UI.addDisplaySelectHandlers();
         UI.addMachineHandlers();
         UI.addConnectionControlHandlers();
         UI.addClipboardHandlers();
@@ -871,6 +872,7 @@ const UI = {
         UI.closePowerPanel();
         UI.closeClipboardPanel();
         UI.closeExtraKeys();
+        UI.closeDisplaySelect();
     },
 
 /* ------^-------
@@ -1095,6 +1097,7 @@ const UI = {
 
         UI.rfb.addEventListener("connect", UI.connectFinished);
         UI.rfb.addEventListener("disconnect", UI.disconnectFinished);
+        UI.rfb.addEventListener("arddisplaylist", UI.ardDisplayListUpdated);
         UI.rfb.addEventListener("serververification", UI.serverVerify);
         UI.rfb.addEventListener("credentialsrequired", UI.credentials);
         UI.rfb.addEventListener("securityfailure", UI.securityFailed);
@@ -1790,6 +1793,107 @@ const UI = {
 
 /* ------^-------
  *   /EXTRA KEYS
+ * ==============
+ *  DISPLAY SELECT
+ * ------v------*/
+
+    addDisplaySelectHandlers() {
+        document.getElementById('noVNC_display_select_button')
+            .addEventListener('click', UI.toggleDisplaySelect);
+    },
+
+    openDisplaySelect() {
+        UI.closeAllPanels();
+        UI.openControlbar();
+        document.getElementById('noVNC_display_select')
+            .classList.add("noVNC_open");
+        document.getElementById('noVNC_display_select_button')
+            .classList.add("noVNC_selected");
+        // Reflect the currently active display selection in the flyout
+        if (UI.rfb) {
+            const combineAll = UI.rfb._ardCombineAllDisplays;
+            const displayId  = UI.rfb._ardSelectedDisplayId;
+            document.getElementById('noVNC_display_select_buttons')
+                .querySelectorAll('.noVNC_button').forEach((b) => {
+                    const ca = parseInt(b.dataset.combineAll);
+                    const id = parseInt(b.dataset.displayId);
+                    const active = ca === combineAll &&
+                                   (combineAll === 1 || id === displayId);
+                    b.classList.toggle('noVNC_selected', active);
+                });
+        }
+    },
+
+    closeDisplaySelect() {
+        document.getElementById('noVNC_display_select')
+            .classList.remove("noVNC_open");
+        document.getElementById('noVNC_display_select_button')
+            .classList.remove("noVNC_selected");
+    },
+
+    toggleDisplaySelect() {
+        const btn = document.getElementById('noVNC_display_select_button');
+        if (btn.disabled) return;
+        if (document.getElementById('noVNC_display_select')
+            .classList.contains("noVNC_open")) {
+            UI.closeDisplaySelect();
+        } else {
+            UI.openDisplaySelect();
+        }
+    },
+
+    ardDisplayListUpdated(e) {
+        const displays = e.detail.displays;
+        const container = document.getElementById('noVNC_display_select_buttons');
+        const btn = document.getElementById('noVNC_display_select_button');
+
+        // Gray out when there is nothing to switch between
+        if (!displays || displays.length <= 1) {
+            btn.disabled = true;
+            container.innerHTML = '';
+            return;
+        }
+        btn.disabled = false;
+
+        // Rebuild button list: "All" first, then sorted by display ID
+        container.innerHTML = '';
+        const sorted = displays.slice().sort((a, b) => a.id - b.id);
+
+        const makeBtn = (label, combineAll, displayId) => {
+            const el = document.createElement('button');
+            el.className = 'noVNC_button';
+            el.dataset.displayId = displayId;
+            el.dataset.combineAll = combineAll;
+
+            const icon = document.createElement('img');
+            icon.src = 'app/images/monitor.svg';
+            icon.alt = '';
+
+            const text = document.createElement('span');
+            text.textContent = label;
+
+            el.appendChild(icon);
+            el.appendChild(text);
+            el.addEventListener('click', () => {
+                UI.rfb.selectDisplay(combineAll, displayId);
+                // Mark active button
+                container.querySelectorAll('.noVNC_button')
+                    .forEach(b => b.classList.remove('noVNC_selected'));
+                el.classList.add('noVNC_selected');
+                UI.closeDisplaySelect();
+                UI.rfb.focus();
+            });
+            return el;
+        };
+
+        container.appendChild(makeBtn('All', 1, 0));
+        sorted.forEach((d, i) => {
+            container.appendChild(makeBtn(String(i + 1), 0, d.id));
+        });
+    },
+
+/* ------^-------
+ *  /DISPLAY SELECT
  * ==============
  *     MISC
  * ------v------*/

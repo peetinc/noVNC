@@ -157,6 +157,11 @@ export default class RFB extends EventTargetMixin {
         this._ardCursorZlib = new Inflator();  // zlib for cursor data (reset per image)
         this._ardActiveCursor = null;    // {type:'system'|'custom', id}
         this._ardGotCursor = false;      // track if cursor data received in first FBU
+        this._ardDisplays = [];            // per-display geometry from DisplayInfo/DisplayInfo2
+        this._ardCombineAllDisplays = 1;   // 1=all displays combined by default
+        this._ardSelectedDisplayId = 0;    // display ID when combineAll=0
+        this._ardCombinedFbWidth = 0;      // combined desktop width (from DisplayInfo2 header)
+        this._ardCombinedFbHeight = 0;     // combined desktop height (from DisplayInfo2 header)
         this._rfbVeNCryptState = 0;
         this._rfbXvpVer = 0;
 
@@ -441,8 +446,21 @@ export default class RFB extends EventTargetMixin {
         this._ardQualityPreset = preset;
         if (this._rfbConnectionState === 'connected' && this._rfbAppleARD) {
             this._sendEncodings();
-            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
-                                         this._fbWidth, this._fbHeight);
+            this._sendArdSetDisplay();
+            // Use correct region dimensions matching the current display selection
+            const combineAll = this._ardCombineAllDisplays;
+            let reqW, reqH;
+            if (combineAll) {
+                reqW = this._ardCombinedFbWidth || this._fbWidth;
+                reqH = this._ardCombinedFbHeight || this._fbHeight;
+            } else {
+                const disp = this._ardDisplays.find(
+                    d => d.id === this._ardSelectedDisplayId);
+                reqW = disp ? disp.width  : this._fbWidth;
+                reqH = disp ? disp.height : this._fbHeight;
+            }
+            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, reqW, reqH);
+            this._sendArdAutoFBUpdate(1, 0, 0, reqW, reqH);
             this._sock.flush();
         }
     }
@@ -617,6 +635,41 @@ export default class RFB extends EventTargetMixin {
 
             RFB.messages.clientCutText(this._sock, data);
         }
+    }
+
+    // Switch to a specific display or combined view.
+    // combineAll: 1=all displays combined, 0=single display
+    // displayId: display ID when combineAll=0
+    selectDisplay(combineAll, displayId) {
+        if (this._rfbConnectionState !== 'connected' || !this._rfbAppleARD) {
+            Log.Info("ARD selectDisplay(" + combineAll + ", " + displayId +
+                     ") skipped — state=" + this._rfbConnectionState);
+            return;
+        }
+        // Determine the correct framebuffer dimensions for this selection.
+        // combineAll=1 uses the combined desktop size; combineAll=0 looks up
+        // the target display's dimensions from the parsed display list.
+        // Using the wrong size here causes the server to auto-update the
+        // wrong region after SetDisplay.
+        let reqW, reqH;
+        if (combineAll) {
+            reqW = this._ardCombinedFbWidth || this._fbWidth;
+            reqH = this._ardCombinedFbHeight || this._fbHeight;
+        } else {
+            const disp = this._ardDisplays.find(d => d.id === displayId);
+            reqW = disp ? disp.width  : this._fbWidth;
+            reqH = disp ? disp.height : this._fbHeight;
+        }
+
+        Log.Info("ARD selectDisplay(combineAll=" + combineAll +
+                 " displayId=" + displayId + ") req=" + reqW + "x" + reqH);
+        this._ardCombineAllDisplays = combineAll;
+        this._ardSelectedDisplayId = displayId;
+        this._sendEncodings();
+        this._sendArdSetDisplay();
+        RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, reqW, reqH);
+        this._sendArdAutoFBUpdate(1, 0, 0, reqW, reqH);
+        this._sock.flush();
     }
 
     getImageData() {
@@ -1631,8 +1684,13 @@ export default class RFB extends EventTargetMixin {
             this._rfbVersion = this._rfbMaxVersion;
         }
 
-        const cversion = "00" + parseInt(this._rfbVersion, 10) +
+        let cversion;
+        if (this._rfbAppleARD) {
+            cversion = "003.889"; // ARD requires echoing the version exactly
+        } else {
+            cversion = "00" + parseInt(this._rfbVersion, 10) +
                        ".00" + ((this._rfbVersion * 10) % 10);
+        }
         this._sock.sQpushString("RFB " + cversion + "\n");
         this._sock.flush();
         Log.Debug('Sent ProtocolVersion: ' + cversion);
@@ -2598,22 +2656,48 @@ export default class RFB extends EventTargetMixin {
         }
 
         if (this._rfbAppleARD) {
-            RFB.messages.pixelFormat(this._sock, this._fbDepth, true, 16, 8, 0);
+            Log.Info("ARD init: fb=" + this._fbWidth + "x" + this._fbHeight +
+                     " name=" + this._fbName);
+            // ARD init sequence (matches noARD):
+            // ViewerInfo → SetMode → SetDisplay → AutoPasteboard
+            // → SetEncodings → PixelFormat → SetEncryption
+            // → FBUpdateRequest + AutoFBUpdate
+            Log.Info("ARD init [1/7] ViewerInfo");
+            this._sendArdViewerInfo();
+            Log.Info("ARD init [2/7] SetMode(Control)");
+            this._sendArdSetMode(1);       // 1=Control
+            Log.Info("ARD init [3/7] SetDisplay(combineAll=1)");
+            this._sendArdSetDisplay();
+            Log.Info("ARD init [4/8] AutoPasteboard(1)");
             this._sendArdAutoPasteboard(1);
+            Log.Info("ARD init [5/8] SetEncodings(preset=" + this._ardQualityPreset + ")");
+            this._sendEncodings();
+            Log.Info("ARD init [6/8] PixelFormat(32bpp depth=" + this._fbDepth + ")");
+            RFB.messages.pixelFormat(this._sock, this._fbDepth, true, 16, 8, 0);
+
+            if (this._ardDHKey) {
+                Log.Info("ARD init [7/8] SetEncryption(request)");
+                RFB.messages.appleSetEncryption(this._sock, 1);
+            } else {
+                Log.Info("ARD init [7/8] SetEncryption skipped (no DH key)");
+            }
+
+            Log.Info("ARD init [8/8] FBUpdateRequest(full " +
+                     this._fbWidth + "x" + this._fbHeight + ") + AutoFBUpdate");
+            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                         this._fbWidth, this._fbHeight);
+            this._sendArdAutoFBUpdate(
+                1, 0, 0, this._fbWidth, this._fbHeight);
+
             // Set default arrow cursor and track first-FBU cursor delivery
             this._ardActiveCursor = { type: 'system', id: 0 };
             this._setArdSystemCursor(0);
             this._ardGotCursor = false;
         } else {
             RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
-        }
-        this._sendEncodings();
-        RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, this._fbWidth, this._fbHeight);
-
-        // Request session encryption if we have the DH key
-        if (this._ardDHKey) {
-            RFB.messages.appleSetEncryption(this._sock, 1);
-            Log.Info("ARD: sent SetEncryption(request)");
+            this._sendEncodings();
+            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                         this._fbWidth, this._fbHeight);
         }
 
         this._updateConnectionState('connected');
@@ -2623,10 +2707,10 @@ export default class RFB extends EventTargetMixin {
     _sendEncodings() {
         if (this._rfbAppleARD) {
             const presetEncodings = {
-                halftone:  [1000, 16, 6, 0],
-                gray:      [1001, 16, 6, 0],
+                halftone: [1000, 16, 6, 0],
+                gray: [1001, 16, 6, 0],
                 thousands: [1002, 16, 6, 0],
-                millions:  [16, 6, 0],
+                millions: [16, 6, 0],
             };
             const encs = presetEncodings[this._ardQualityPreset] || presetEncodings.millions;
             encs.push(encodings.pseudoEncodingDesktopSize);
@@ -2637,6 +2721,8 @@ export default class RFB extends EventTargetMixin {
             encs.push(encodings.pseudoEncodingQEMUExtendedKeyEvent);
             encs.push(encodings.pseudoEncodingExtendedDesktopSize);
             encs.push(encodings.pseudoEncodingArdSessionEncryption);
+            encs.push(encodings.pseudoEncodingArdDisplayInfo);
+            encs.push(encodings.pseudoEncodingArdDisplayInfo2);
             RFB.messages.clientEncodings(this._sock, encs);
             return;
         }
@@ -2711,7 +2797,7 @@ export default class RFB extends EventTargetMixin {
 
             case 'ClientInitialisation':
                 this._sock.sQpush8(this._rfbAppleARD ? 0xc1 :
-                                   (this._shared ? 1 : 0));
+                    (this._shared ? 1 : 0));
                 this._sock.flush();
                 this._rfbInitState = 'ServerInitialisation';
                 return true;
@@ -2985,6 +3071,78 @@ export default class RFB extends EventTargetMixin {
         this._sock.sQpush32(0);         // reserved
         // Don't flush here — batch with SetEncodings
         Log.Info("ARD: queued AutoPasteboard(" + command + ")");
+    }
+
+    // ARD ViewerInfo (0x21) — Client identity, 66 bytes total
+    // type(1) + pad(1) + size(2) + appClass(2) + appId(4) + appVer(3×4) +
+    //   osVer(3×4) + commandSupport(32)
+    _sendArdViewerInfo() {
+        this._sock.sQpush8(0x21);         // message type
+        this._sock.sQpush8(0x00);         // padding
+        this._sock.sQpush16(0x003e);      // body size = 62
+        this._sock.sQpush16(0x0001);      // appClass = 1
+        this._sock.sQpush32(0x00000002);  // appId = 2 (Screen Sharing)
+        this._sock.sQpush32(6);           // appVersion.major
+        this._sock.sQpush32(1);           // appVersion.minor
+        this._sock.sQpush32(0);           // appVersion.patch
+        this._sock.sQpush32(26);          // osVersion.major (macOS 26)
+        this._sock.sQpush32(2);           // osVersion.minor
+        this._sock.sQpush32(0);           // osVersion.patch
+        // Command Support bitmap (32 bytes = 256 bits)
+        this._sock.sQpush8(0xb0);         // byte 0
+        this._sock.sQpush8(0x00);         // byte 1
+        this._sock.sQpush8(0x0c);         // byte 2
+        this._sock.sQpush8(0x03);         // byte 3
+        this._sock.sQpush8(0x90);         // byte 4
+        this._sock.sQpush8(0x00);         // byte 5
+        this._sock.sQpush8(0x00);         // byte 6
+        this._sock.sQpush8(0x00);         // byte 7
+        this._sock.sQpush8(0x00);         // byte 8
+        this._sock.sQpush8(0x00);         // byte 9
+        this._sock.sQpush8(0x40);         // byte 10
+        this._sock.sQpush8(0x00);         // byte 11
+        for (let i = 12; i < 32; i++) {
+            this._sock.sQpush8(0x00);     // bytes 12-31: zero
+        }
+        Log.Info("ARD: queued ViewerInfo (66 bytes)");
+    }
+
+    // ARD SetMode (0x0a) — 4 bytes
+    // mode: 0=Observe, 1=Control, 2=Exclusive
+    _sendArdSetMode(mode) {
+        this._sock.sQpush8(0x0a);       // message type
+        this._sock.sQpush8(0);          // padding
+        this._sock.sQpush8(0);          // padding
+        this._sock.sQpush8(mode);       // control mode
+        Log.Info("ARD: queued SetMode(" + mode + ")");
+    }
+
+    // ARD SetDisplay (0x0d) — 8 bytes
+    // Selects which display to share. CombineAll=1 shows all displays.
+    _sendArdSetDisplay() {
+        this._sock.sQpush8(0x0d);                      // message type
+        this._sock.sQpush8(this._ardCombineAllDisplays); // combineAll
+        this._sock.sQpush16(0);                         // padding
+        this._sock.sQpush32(this._ardSelectedDisplayId); // displayId
+        Log.Info("ARD: queued SetDisplay(combineAll=" +
+                 this._ardCombineAllDisplays +
+                 ", displayId=" + this._ardSelectedDisplayId + ")");
+    }
+
+    // ARD AutoFramebufferUpdate (0x09) — 16 bytes
+    // Tells the server to automatically push framebuffer updates
+    // without waiting for explicit FBUpdateRequests.
+    _sendArdAutoFBUpdate(enabled, x, y, w, h) {
+        this._sock.sQpush8(0x09);       // message type
+        this._sock.sQpush8(0x00);       // padding
+        this._sock.sQpush16(enabled);   // 1=enable, 0=disable
+        this._sock.sQpush32(0);         // interval ms (0 = server default)
+        this._sock.sQpush16(x);         // region x
+        this._sock.sQpush16(y);         // region y
+        this._sock.sQpush16(w);         // region width
+        this._sock.sQpush16(h);         // region height
+        Log.Info("ARD: queued AutoFBUpdate(" + enabled +
+                 ", " + w + "x" + h + ")");
     }
 
     // ARD StateChange (0x14)
@@ -3294,7 +3452,40 @@ export default class RFB extends EventTargetMixin {
             case 0x1f: // ARD ClipboardSend
                 return this._handleArdClipboardSend();
 
+            case 0x52: // 'R' — ARD server-initiated re-handshake ("RFB ...")
+                if (this._rfbAppleARD) {
+                    // Server sent "RFB 003.889\n" on the existing connection —
+                    // this happens after login. Consume the remaining 11 bytes
+                    // ("FB 003.889\n"), echo the version back, then reset to the
+                    // Security init state so the auth machinery handles the rest.
+                    if (this._sock.rQwait("ARD re-handshake version", 11)) {
+                        return false;
+                    }
+                    this._sock.rQskipBytes(11); // consume "FB 003.889\n"
+                    Log.Info("ARD: server re-handshake — resetting to Security");
+                    this._sock.sQpushString("RFB 003.889\n");
+                    this._sock.flush();
+                    // Reset per-session display state; notify UI so stale
+                    // display buttons are cleared while re-auth completes.
+                    this._ardDisplays = [];
+                    this.dispatchEvent(new CustomEvent(
+                        "arddisplaylist",
+                        { detail: { displays: [] } }));
+                    // Transition back into the init state machine without creating
+                    // a new WebSocket (_connect() would do that, so bypass it).
+                    this._rfbConnectionState = 'connecting';
+                    this._rfbInitState = 'Security';
+                    return false; // exit the 'connected' while-loop
+                }
+                this._fail("Unexpected server message (type " + msgType + ")");
+                return true;
+
             default:
+                if (this._rfbAppleARD) {
+                    Log.Warn("ARD: unknown server message type 0x" +
+                             msgType.toString(16) + ", skipping");
+                    return true;
+                }
                 this._fail("Unexpected server message (type " + msgType + ")");
                 Log.Debug("sock.rQpeekBytes(30): " + this._sock.rQpeekBytes(30));
                 return true;
@@ -3380,6 +3571,9 @@ export default class RFB extends EventTargetMixin {
                 return this._handleDesktopName();
 
             case encodings.pseudoEncodingDesktopSize:
+                Log.Info("DesktopSize: " + this._fbWidth + "x" +
+                         this._fbHeight + " -> " + this._FBU.width +
+                         "x" + this._FBU.height);
                 this._resize(this._FBU.width, this._FBU.height);
                 return true;
 
@@ -3401,6 +3595,12 @@ export default class RFB extends EventTargetMixin {
 
             case encodings.pseudoEncodingArdCursorAlpha:
                 return this._handleArdCursorAlpha();
+
+            case encodings.pseudoEncodingArdDisplayInfo:
+                return this._handleArdDisplayInfo();
+
+            case encodings.pseudoEncodingArdDisplayInfo2:
+                return this._handleArdDisplayInfo2();
 
             default:
                 return this._handleDataRect();
@@ -3719,6 +3919,164 @@ export default class RFB extends EventTargetMixin {
                 }
             }
         }
+    }
+
+    // Encoding 1101: DisplayInfo
+    // Display configuration: framebuffer dimensions + per-display entries.
+    // Payload: Width(2) + Height(2) + Count(2) + Flags(2) = 8 bytes
+    //   + Count * [ID(4) + W(2) + H(2) + Magic(4) + PixelFormat(16)] = 28 bytes each
+    _handleArdDisplayInfo() {
+        if (this._sock.rQwait("ArdDisplayInfo header", 8)) { return false; }
+        const hdr = this._sock.rQpeekBytes(8);
+        const fbWidth  = (hdr[0] << 8) | hdr[1];
+        const fbHeight = (hdr[2] << 8) | hdr[3];
+        const count    = (hdr[4] << 8) | hdr[5];
+        const flags    = (hdr[6] << 8) | hdr[7];
+
+        const perDisplaySize = 28;
+        const totalSize = 8 + count * perDisplaySize;
+
+        if (this._sock.rQwait("ArdDisplayInfo full", totalSize)) { return false; }
+
+        this._sock.rQskipBytes(8);
+
+        Log.Info("ArdDisplayInfo: " + fbWidth + "x" + fbHeight +
+                 " displays=" + count + " flags=0x" + flags.toString(16));
+
+        this._ardDisplays = [];
+        for (let i = 0; i < count; i++) {
+            const displayId = this._sock.rQshift32() >>> 0;
+            const dw = this._sock.rQshift16();
+            const dh = this._sock.rQshift16();
+            const magic = this._sock.rQshift32() >>> 0;
+            this._sock.rQskipBytes(16);  // PixelFormat (not needed)
+
+            this._ardDisplays.push({
+                id: displayId, width: dw, height: dh, magic: magic
+            });
+
+            Log.Info("  Display " + i + ": id=" + displayId +
+                     " " + dw + "x" + dh +
+                     " magic=0x" + magic.toString(16));
+        }
+
+        this.dispatchEvent(new CustomEvent(
+            "arddisplaylist",
+            { detail: { displays: this._ardDisplays } }));
+
+        return true;
+    }
+
+    // Encoding 1105: DisplayInfo2
+    // Extended display info with Retina/HiDPI support. Size-prefixed payload.
+    // Payload: Size(2) + Version(2) + Width(2) + Height(2) + ScaledW(2) +
+    //   ScaledH(2) + DisplayID(4) + Flags(4) + DisplayCount(2) = 22 bytes fixed
+    //   + Count * 56 bytes per-display entries
+    _handleArdDisplayInfo2() {
+        if (this._sock.rQwait("ArdDisplayInfo2 header", 2)) { return false; }
+        const sizePeek = this._sock.rQpeekBytes(2);
+        const payloadSize = (sizePeek[0] << 8) | sizePeek[1];
+
+        const totalSize = 2 + payloadSize;
+        if (this._sock.rQwait("ArdDisplayInfo2 full", totalSize)) { return false; }
+
+        this._sock.rQskipBytes(2);
+
+        if (payloadSize < 20) {
+            Log.Warn("ArdDisplayInfo2: payload too small (" +
+                     payloadSize + "), skipping");
+            if (payloadSize > 0) {
+                this._sock.rQskipBytes(payloadSize);
+            }
+            return true;
+        }
+
+        const version      = this._sock.rQshift16();
+        const fbWidth      = this._sock.rQshift16();
+        const fbHeight     = this._sock.rQshift16();
+        const scaledW      = this._sock.rQshift16();
+        const scaledH      = this._sock.rQshift16();
+        const displayId    = this._sock.rQshift32() >>> 0;
+        const displayFlags = this._sock.rQshift32() >>> 0;
+        const displayCount = this._sock.rQshift16();
+
+        // Store combined desktop dimensions for use when switching back to "All"
+        this._ardCombinedFbWidth = fbWidth;
+        this._ardCombinedFbHeight = fbHeight;
+
+        Log.Info("ArdDisplayInfo2: v" + version +
+                 " fb=" + fbWidth + "x" + fbHeight +
+                 " scaled=" + scaledW + "x" + scaledH +
+                 " activeDisplay=" + displayId +
+                 " displays=" + displayCount +
+                 " flags=0x" + displayFlags.toString(16));
+
+        const perDisplaySize = 56;
+        const remainingBytes = payloadSize - 20;
+        const displaysToParse = Math.min(
+            displayCount,
+            Math.floor(remainingBytes / perDisplaySize)
+        );
+
+        // Rect coordinates are signed i16 (displays can have negative origins)
+        function s16(v) { return v > 0x7FFF ? v - 0x10000 : v; }
+
+        this._ardDisplays = [];
+        for (let i = 0; i < displaysToParse; i++) {
+            // Read 8-byte doubles via DataView
+            const scaleBytes = this._sock.rQshiftBytes(16, false);
+            const dv = new DataView(scaleBytes.buffer,
+                                    scaleBytes.byteOffset,
+                                    scaleBytes.byteLength);
+            const backingScale  = dv.getFloat64(0, false);  // big-endian
+            const displayScale  = dv.getFloat64(8, false);
+
+            const dId           = this._sock.rQshift32() >>> 0;
+            const dTop          = s16(this._sock.rQshift16());
+            const dLeft         = s16(this._sock.rQshift16());
+            const dBottom       = s16(this._sock.rQshift16());
+            const dRight        = s16(this._sock.rQshift16());
+            const bTop          = s16(this._sock.rQshift16());
+            const bLeft         = s16(this._sock.rQshift16());
+            const bBottom       = s16(this._sock.rQshift16());
+            const bRight        = s16(this._sock.rQshift16());
+            const dFlags        = this._sock.rQshift32() >>> 0;
+            this._sock.rQskipBytes(16);  // PixelFormat
+
+            const isPrimary = (dFlags & 1) !== 0;
+            this._ardDisplays.push({
+                id: dId,
+                width: dRight - dLeft,
+                height: dBottom - dTop,
+                backingScale: backingScale,
+                displayScale: displayScale,
+                primary: isPrimary
+            });
+
+            Log.Info("  Display " + i + ": id=" + dId +
+                     " rect=(" + dLeft + "," + dTop +
+                     ")-(" + dRight + "," + dBottom + ")" +
+                     " backing=(" + bLeft + "," + bTop +
+                     ")-(" + bRight + "," + bBottom + ")" +
+                     " scale=" + backingScale.toFixed(1) + "x" +
+                     (isPrimary ? " [primary]" : ""));
+        }
+
+        // Skip any remaining unparsed bytes
+        const parsedBytes = 20 + displaysToParse * perDisplaySize;
+        const leftover = payloadSize - parsedBytes;
+        if (leftover > 0) {
+            this._sock.rQskipBytes(leftover);
+        }
+
+        this.dispatchEvent(new CustomEvent(
+            "arddisplaylist",
+            { detail: { displays: this._ardDisplays } }));
+
+        Log.Info("ArdDisplayInfo2: " + scaledW + "x" + scaledH +
+                 " displays=" + this._ardDisplays.length);
+
+        return true;
     }
 
     _handleDesktopName() {
