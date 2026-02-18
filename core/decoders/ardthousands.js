@@ -3,6 +3,8 @@
  * Copyright (C) 2024 The noVNC authors
  * Licensed under MPL 2.0 (see LICENSE.txt)
  *
+ * See README.md for usage and integration instructions.
+ *
  * ARD ArdThousands (encoding 1002) decoder.
  * 16-bit RGB555, zlib compressed.
  */

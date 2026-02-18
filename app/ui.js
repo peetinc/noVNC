@@ -1805,8 +1805,8 @@ const UI = {
             .classList.add("noVNC_selected");
         // Reflect the currently active display selection in the flyout
         if (UI.rfb) {
-            const combineAll = UI.rfb._ardCombineAllDisplays;
-            const displayId  = UI.rfb._ardSelectedDisplayId;
+            const combineAll = UI.rfb.ardCombineAllDisplays;
+            const displayId  = UI.rfb.ardSelectedDisplayId;
             document.getElementById('noVNC_display_select_buttons')
                 .querySelectorAll('.noVNC_button').forEach((b) => {
                     const ca = parseInt(b.dataset.combineAll);
@@ -1928,22 +1928,18 @@ const UI = {
     },
 
     syncQualityStops() {
-        const preset = UI.rfb ? UI.rfb._ardQualityPreset : 'thousands';
-        document.querySelectorAll('.noVNC_quality_stop')
-            .forEach((s) => {
-                s.classList.toggle('noVNC_active',
-                                   s.dataset.preset === preset);
-            });
+        const preset = UI.rfb ? UI.rfb.qualityPreset : 'thousands';
+        UI.showQualityPreview(preset);
     },
 
     // Map a pointer Y position to the nearest quality preset
-    _qualityFromY(track, clientY) {
+    qualityFromY(track, clientY) {
         const rect = track.getBoundingClientRect();
         const ratio = (clientY - rect.top) / rect.height;
         const clamped = Math.max(0, Math.min(1, ratio));
         // Top=millions(0), bottom=halftone(3) — 4 zones
         const presets = ['millions', 'thousands', 'gray', 'halftone'];
-        const idx = Math.min(3, Math.floor(clamped * 4));
+        const idx = Math.min(presets.length - 1, Math.floor(clamped * presets.length));
         return presets[idx];
     },
 
@@ -1954,16 +1950,16 @@ const UI = {
         track.setPointerCapture(e.pointerId);
 
         // Show visual preview immediately, but don't send to server yet
-        let pending = UI._qualityFromY(track, e.clientY);
-        UI._showQualityPreview(pending);
+        let pending = UI.qualityFromY(track, e.clientY);
+        UI.showQualityPreview(pending);
 
         const onMove = (ev) => {
             ev.preventDefault();
-            pending = UI._qualityFromY(track, ev.clientY);
-            UI._showQualityPreview(pending);
+            pending = UI.qualityFromY(track, ev.clientY);
+            UI.showQualityPreview(pending);
         };
         const onUp = (ev) => {
-            pending = UI._qualityFromY(track, ev.clientY);
+            pending = UI.qualityFromY(track, ev.clientY);
             // Send to server only on release
             if (UI.rfb) {
                 UI.rfb.qualityPreset = pending;
@@ -1981,7 +1977,7 @@ const UI = {
     },
 
     // Visual-only preview during drag (no server communication)
-    _showQualityPreview(preset) {
+    showQualityPreview(preset) {
         document.querySelectorAll('.noVNC_quality_stop')
             .forEach((s) => {
                 s.classList.toggle('noVNC_active',

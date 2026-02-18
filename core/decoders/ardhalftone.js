@@ -3,6 +3,8 @@
  * Copyright (C) 2024 The noVNC authors
  * Licensed under MPL 2.0 (see LICENSE.txt)
  *
+ * See README.md for usage and integration instructions.
+ *
  * ARD ArdHalftone (encoding 1000) decoder.
  * 1-bit monochrome (halftone dithered), zlib compressed.
  */

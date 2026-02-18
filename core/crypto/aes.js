@@ -1,3 +1,13 @@
+/*
+ * noVNC: HTML5 VNC client
+ * Copyright (C) 2024 The noVNC authors
+ * Licensed under MPL 2.0 (see LICENSE.txt)
+ *
+ * See README.md for usage and integration instructions.
+ *
+ * Synchronous AES-128 implementation (ECB and CBC modes).
+ */
+
 /* eslint-disable comma-spacing */
 
 // AES-128 S-box
@@ -239,13 +249,7 @@ class AES128 {
         if (enc[i] !== ct[i] || dec[i] !== pt[i]) { ok = false; break; }
     }
     if (!ok) {
-        /* eslint-disable no-console */
-        console.error("AES-128 SELF-TEST FAILED!",
-                      "enc=", Array.from(enc).map(b => b.toString(16).padStart(2, '0')).join(''),
-                      "expected=", Array.from(ct).map(b => b.toString(16).padStart(2, '0')).join(''),
-                      "dec=", Array.from(dec).map(b => b.toString(16).padStart(2, '0')).join(''),
-                      "expected=", Array.from(pt).map(b => b.toString(16).padStart(2, '0')).join(''));
-        /* eslint-enable no-console */
+        throw new Error("AES-128 self-test failed");
     }
 })();
 

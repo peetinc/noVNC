@@ -3,7 +3,9 @@
  * Copyright (C) 2024 The noVNC authors
  * Licensed under MPL 2.0 (see LICENSE.txt)
  *
- * Synchronous SHA-1 implementation (matching MD5 pattern in md5.js)
+ * See README.md for usage and integration instructions.
+ *
+ * Synchronous SHA-1 implementation.
  */
 
 export function SHA1(data) {

@@ -163,6 +163,9 @@ export default class RFB extends EventTargetMixin {
         this._ardCombinedFbWidth = 0;      // combined desktop width (from DisplayInfo2 header)
         this._ardCombinedFbHeight = 0;     // combined desktop height (from DisplayInfo2 header)
         this._ardFirstDisplayInfo = true;  // first DisplayInfo2 needs double-tap
+        this._ardLastClipboardReqTime = 0;
+        this._ardPrevCombinedW = 0;
+        this._ardPrevCombinedH = 0;
         this._rfbVeNCryptState = 0;
         this._rfbXvpVer = 0;
 
@@ -448,11 +451,7 @@ export default class RFB extends EventTargetMixin {
         if (this._rfbConnectionState === 'connected' && this._rfbAppleARD) {
             this._sendEncodings();
             this._sendArdSetDisplay();
-            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
-                                         this._fbWidth, this._fbHeight);
-            this._sendArdAutoFBUpdate(1, 0, 0,
-                                      this._fbWidth, this._fbHeight);
-            this._sock.flush();
+            this._requestArdFullUpdate(this._fbWidth, this._fbHeight);
         }
     }
 
@@ -500,6 +499,8 @@ export default class RFB extends EventTargetMixin {
     }
 
     get isAppleARD() { return this._rfbAppleARD; }
+    get ardCombineAllDisplays() { return this._ardCombineAllDisplays; }
+    get ardSelectedDisplayId() { return this._ardSelectedDisplayId; }
 
     sendCtrlAltDel() {
         if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
@@ -542,7 +543,7 @@ export default class RFB extends EventTargetMixin {
             const cipher = this._getArdECBCipher();
             const payload = this._buildEncryptedKeyPayload(keysym || 0, down);
             const encrypted = cipher.encrypt({ name: "AES-128-ECB" }, payload);
-            Log.Info("Sending encrypted key event (" + (down ? "down" : "up") + "): keysym " + (keysym || 0));
+            Log.Debug("Sending encrypted key event (" + (down ? "down" : "up") + "): keysym " + (keysym || 0));
             RFB.messages.encryptedEvent(this._sock, 0, encrypted);
             return;
         }
@@ -626,8 +627,8 @@ export default class RFB extends EventTargetMixin {
     //   confirms the new composite layout.
     selectDisplay(combineAll, displayId) {
         if (this._rfbConnectionState !== 'connected' || !this._rfbAppleARD) {
-            Log.Info("ARD selectDisplay(" + combineAll + ", " + displayId +
-                     ") skipped — state=" + this._rfbConnectionState);
+            Log.Debug("ARD selectDisplay(" + combineAll + ", " + displayId +
+                      ") skipped -- state=" + this._rfbConnectionState);
             return;
         }
 
@@ -652,10 +653,7 @@ export default class RFB extends EventTargetMixin {
             this._sendEncodings();
             this._sendArdSetDisplay();
             this._sendArdSetDisplay();  // native client sends twice
-            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
-                                         reqW, reqH);
-            this._sendArdAutoFBUpdate(1, 0, 0, reqW, reqH);
-            this._sock.flush();
+            this._requestArdFullUpdate(reqW, reqH);
         }
     }
 
@@ -2045,23 +2043,29 @@ export default class RFB extends EventTargetMixin {
         return false;
     }
 
+    // Pack username/password into a 128-byte credential buffer
+    // (64 bytes each, null-terminated, random-padded)
+    _packArdCredentials() {
+        const username = encodeUTF8(this._rfbCredentials.username).substring(0, 63);
+        const password = encodeUTF8(this._rfbCredentials.password).substring(0, 63);
+        const buf = window.crypto.getRandomValues(new Uint8Array(128));
+        for (let i = 0; i < username.length; i++) {
+            buf[i] = username.charCodeAt(i);
+        }
+        buf[username.length] = 0;
+        for (let i = 0; i < password.length; i++) {
+            buf[64 + i] = password.charCodeAt(i);
+        }
+        buf[64 + password.length] = 0;
+        return buf;
+    }
+
     async _negotiateARDAuthAsync(keyLength, serverPublicKey, clientKey) {
         const clientPublicKey = legacyCrypto.exportKey("raw", clientKey.publicKey);
         const sharedKey = legacyCrypto.deriveBits(
             { name: "DH", public: serverPublicKey }, clientKey.privateKey, keyLength * 8);
 
-        const username = encodeUTF8(this._rfbCredentials.username).substring(0, 63);
-        const password = encodeUTF8(this._rfbCredentials.password).substring(0, 63);
-
-        const credentials = window.crypto.getRandomValues(new Uint8Array(128));
-        for (let i = 0; i < username.length; i++) {
-            credentials[i] = username.charCodeAt(i);
-        }
-        credentials[username.length] = 0;
-        for (let i = 0; i < password.length; i++) {
-            credentials[64 + i] = password.charCodeAt(i);
-        }
-        credentials[64 + password.length] = 0;
+        const credentials = this._packArdCredentials();
 
         const key = await legacyCrypto.digest("MD5", sharedKey);
         this._ardDHKey = new Uint8Array(key);
@@ -2123,14 +2127,14 @@ export default class RFB extends EventTargetMixin {
 
         // Stage 4: Wait for RSA response
         if (this._ardRSATunnelStage === 4) {
-            if (this._sock.rQwait("RSATunnel response", 4)) return false;
+            if (this._sock.rQwait("RSATunnel response", 4)) { return false; }
             const responseLen = this._sock.rQshift32();
             if (responseLen > 4096) {
                 return this._fail("RSATunnel: response too large (" +
                                   responseLen + " bytes)");
             }
             if (responseLen > 0) {
-                if (this._sock.rQwait("RSATunnel response body", responseLen, 4)) return false;
+                if (this._sock.rQwait("RSATunnel response body", responseLen, 4)) { return false; }
                 const responseData = this._sock.rQshiftBytes(responseLen);
                 if (responseData.length >= 2) {
                     const view = new DataView(responseData.buffer, responseData.byteOffset);
@@ -2150,12 +2154,12 @@ export default class RFB extends EventTargetMixin {
         if (this._ardRSATunnelStage === 0) {
             const cachedKey = this._getCachedRSAKey();
             if (cachedKey) {
-                Log.Info("RSATunnel: using cached server key");
+                Log.Debug("RSATunnel: using cached server key");
                 this._ardRSAServerKey = cachedKey;
                 this._ardRSATunnelStage = 2;
             } else {
                 // Send key request
-                Log.Info("RSATunnel: requesting server public key");
+                Log.Debug("RSATunnel: requesting server public key");
 
                 // [u32be 10][u16le 1][u32le RSA1][u16be 0][u16 0] = 14 bytes
                 this._sock.sQpush32(10);                // payload length (BE)
@@ -2174,14 +2178,14 @@ export default class RFB extends EventTargetMixin {
 
         // Stage 1: Read key response
         if (this._ardRSATunnelStage === 1) {
-            if (this._sock.rQwait("RSATunnel key response length", 4)) return false;
+            if (this._sock.rQwait("RSATunnel key response length", 4)) { return false; }
             const payloadLen = this._sock.rQshift32(); // u32 BE
             if (payloadLen > 8192) {
                 return this._fail("RSATunnel: key response too large (" +
                                   payloadLen + " bytes)");
             }
 
-            if (this._sock.rQwait("RSATunnel key response", payloadLen, 4)) return false;
+            if (this._sock.rQwait("RSATunnel key response", payloadLen, 4)) { return false; }
             const payload = this._sock.rQshiftBytes(payloadLen);
             const pView = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
 
@@ -2217,17 +2221,7 @@ export default class RFB extends EventTargetMixin {
             this._ardDHKey = new Uint8Array(randomBytes);
 
             // Pack credentials (same format as Type 30)
-            const credentials = window.crypto.getRandomValues(new Uint8Array(128));
-            const username = encodeUTF8(this._rfbCredentials.username).substring(0, 63);
-            const password = encodeUTF8(this._rfbCredentials.password).substring(0, 63);
-            for (let i = 0; i < username.length; i++) {
-                credentials[i] = username.charCodeAt(i);
-            }
-            credentials[username.length] = 0;
-            for (let i = 0; i < password.length; i++) {
-                credentials[64 + i] = password.charCodeAt(i);
-            }
-            credentials[64 + password.length] = 0;
+            const credentials = this._packArdCredentials();
 
             // AES-ECB encrypt credentials
             const aesCipher = await legacyCrypto.importKey(
@@ -2676,7 +2670,7 @@ export default class RFB extends EventTargetMixin {
 
             if (this._ardDHKey) {
                 Log.Info("ARD init [8/10] SetEncryption(request)");
-                RFB.messages.appleSetEncryption(this._sock, 1);
+                RFB.messages.ardSetEncryption(this._sock, 1);
             } else {
                 Log.Info("ARD init [8/10] SetEncryption skipped (no DH key)");
             }
@@ -2795,6 +2789,7 @@ export default class RFB extends EventTargetMixin {
                 return this._handleSecurityReason();
 
             case 'ClientInitialisation':
+                // 0xc1 = shared (bit 0) + ARD extension flags (bits 6-7)
                 this._sock.sQpush8(this._rfbAppleARD ? 0xc1 :
                     (this._shared ? 1 : 0));
                 this._sock.flush();
@@ -3069,7 +3064,7 @@ export default class RFB extends EventTargetMixin {
         this._sock.sQpush16(command);   // command (1=enable, 0=disable)
         this._sock.sQpush32(0);         // reserved
         // Don't flush here — batch with SetEncodings
-        Log.Info("ARD: queued AutoPasteboard(" + command + ")");
+        Log.Debug("ARD: queued AutoPasteboard(" + command + ")");
     }
 
     // ARD ViewerInfo (0x21) — Client identity, 66 bytes total
@@ -3103,7 +3098,7 @@ export default class RFB extends EventTargetMixin {
         for (let i = 12; i < 32; i++) {
             this._sock.sQpush8(0x00);     // bytes 12-31: zero
         }
-        Log.Info("ARD: queued ViewerInfo (66 bytes)");
+        Log.Debug("ARD: queued ViewerInfo (66 bytes)");
     }
 
     // ARD SetMode (0x0a) — 4 bytes
@@ -3113,7 +3108,7 @@ export default class RFB extends EventTargetMixin {
         this._sock.sQpush8(0);          // padding
         this._sock.sQpush8(0);          // padding
         this._sock.sQpush8(mode);       // control mode
-        Log.Info("ARD: queued SetMode(" + mode + ")");
+        Log.Debug("ARD: queued SetMode(" + mode + ")");
     }
 
     // ARD SetDisplay (0x0d) — 8 bytes
@@ -3123,7 +3118,7 @@ export default class RFB extends EventTargetMixin {
         this._sock.sQpush8(this._ardCombineAllDisplays); // combineAll
         this._sock.sQpush16(0);                         // padding
         this._sock.sQpush32(this._ardSelectedDisplayId); // displayId
-        Log.Info("ARD: queued SetDisplay(combineAll=" +
+        Log.Debug("ARD: queued SetDisplay(combineAll=" +
                  this._ardCombineAllDisplays +
                  ", displayId=" + this._ardSelectedDisplayId + ")");
     }
@@ -3140,8 +3135,16 @@ export default class RFB extends EventTargetMixin {
         this._sock.sQpush16(y);         // region y
         this._sock.sQpush16(w);         // region width
         this._sock.sQpush16(h);         // region height
-        Log.Info("ARD: queued AutoFBUpdate(" + enabled +
+        Log.Debug("ARD: queued AutoFBUpdate(" + enabled +
                  ", " + w + "x" + h + ")");
+    }
+
+    // Request a full (non-incremental) framebuffer update and enable
+    // automatic server-pushed updates for the given region.
+    _requestArdFullUpdate(w, h) {
+        RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, w, h);
+        this._sendArdAutoFBUpdate(1, 0, 0, w, h);
+        this._sock.flush();
     }
 
     // ARD StateChange (0x14)
@@ -3240,7 +3243,7 @@ export default class RFB extends EventTargetMixin {
 
         this._ardClipboardSessionId = sessionId;
 
-        Log.Info("ARD ClipboardSend: format=" + format +
+        Log.Debug("ARD ClipboardSend: format=" + format +
                  " session=" + sessionId +
                  " uncompressed=" + uncompressedSize +
                  " compressed=" + compressedSize);
@@ -3382,7 +3385,7 @@ export default class RFB extends EventTargetMixin {
         const deflator = new Deflator();
         const compressed = deflator.deflate(pb);
 
-        Log.Info("ARD ClipboardSend: sending " + text.length +
+        Log.Debug("ARD ClipboardSend: sending " + text.length +
                  " chars, compressed=" + compressed.length);
 
         RFB.messages.ardClipboardSend(
@@ -3550,7 +3553,7 @@ export default class RFB extends EventTargetMixin {
         // Activate stream encryption after the FBU that delivered the key
         if (this._ardPendingEncryption) {
             this._ardPendingEncryption = false;
-            RFB.messages.appleSetEncryption(this._sock, 2);  // acknowledge
+            RFB.messages.ardSetEncryption(this._sock, 2);  // acknowledge
             Log.Info("ARD: sent SetEncryption(acknowledge)");
             this._enableStreamEncryption();
             RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
@@ -3857,7 +3860,7 @@ export default class RFB extends EventTargetMixin {
             return true;
         }
 
-        Log.Info("ArdCursorAlpha: NewCursor id=" + cursorId +
+        Log.Debug("ArdCursorAlpha: NewCursor id=" + cursorId +
                  " " + w + "x" + h + " hotspot=" + hotx + "," + hoty +
                  " compressed=" + dataSize + " bytes");
 
@@ -3886,7 +3889,7 @@ export default class RFB extends EventTargetMixin {
             rgba[dstOff + 3] = decompressed[alphaOffset + i]; // A
         }
 
-        // Cache and activate (LRU eviction at 100 entries)
+        // Cache and activate (evict oldest entry when cache is full)
         const cacheKeys = Object.keys(this._ardCursorCache);
         if (cacheKeys.length >= 100) {
             const oldest = cacheKeys[0];
@@ -3965,7 +3968,7 @@ export default class RFB extends EventTargetMixin {
 
         this._sock.rQskipBytes(8);
 
-        Log.Info("ArdDisplayInfo: " + fbWidth + "x" + fbHeight +
+        Log.Debug("ArdDisplayInfo: " + fbWidth + "x" + fbHeight +
                  " displays=" + count + " flags=0x" + flags.toString(16));
 
         this._ardDisplays = [];
@@ -3980,9 +3983,9 @@ export default class RFB extends EventTargetMixin {
                 id: displayId, width: dw, height: dh, magic: magic
             });
 
-            Log.Info("  Display " + i + ": id=" + displayId +
-                     " " + dw + "x" + dh +
-                     " magic=0x" + magic.toString(16));
+            Log.Debug("  Display " + i + ": id=" + displayId +
+                      " " + dw + "x" + dh +
+                      " magic=0x" + magic.toString(16));
         }
 
         this.dispatchEvent(new CustomEvent(
@@ -4029,7 +4032,7 @@ export default class RFB extends EventTargetMixin {
         this._ardCombinedFbWidth = scaledW;
         this._ardCombinedFbHeight = scaledH;
 
-        Log.Info("ArdDisplayInfo2: v" + version +
+        Log.Debug("ArdDisplayInfo2: v" + version +
                  " fb=" + fbWidth + "x" + fbHeight +
                  " scaled=" + scaledW + "x" + scaledH +
                  " activeDisplay=" + displayId +
@@ -4080,8 +4083,8 @@ export default class RFB extends EventTargetMixin {
                 primary: isPrimary
             });
 
-            Log.Info("  Display " + i + ": id=" + dId +
-                     " rect=(" + dLeft + "," + dTop +
+            Log.Debug("  Display " + i + ": id=" + dId +
+                      " rect=(" + dLeft + "," + dTop +
                      ")-(" + dRight + "," + dBottom + ")" +
                      " backing=(" + bLeft + "," + bTop +
                      ")-(" + bRight + "," + bBottom + ")" +
@@ -4153,14 +4156,11 @@ export default class RFB extends EventTargetMixin {
             this._ardFirstDisplayInfo = false;
             this._sendEncodings();
             this._sendArdSetDisplay();
-            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
-                                         scaledW, scaledH);
-            this._sendArdAutoFBUpdate(1, 0, 0, scaledW, scaledH);
-            this._sock.flush();
+            this._requestArdFullUpdate(scaledW, scaledH);
         }
 
-        Log.Info("ArdDisplayInfo2: " + scaledW + "x" + scaledH +
-                 " displays=" + this._ardDisplays.length);
+        Log.Debug("ArdDisplayInfo2: " + scaledW + "x" + scaledH +
+                  " displays=" + this._ardDisplays.length);
 
         return true;
     }
@@ -4731,7 +4731,7 @@ RFB.messages = {
         sock.flush();
     },
 
-    appleSetEncryption(sock, command) {
+    ardSetEncryption(sock, command) {
         sock.sQpush8(0x12);       // msg-type: SetEncryption
         sock.sQpush8(0x00);       // padding
         sock.sQpush16(command);   // 1=request, 2=acknowledge
