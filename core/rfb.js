@@ -630,11 +630,16 @@ export default class RFB extends EventTargetMixin {
         this._ardCombineAllDisplays = combineAll;
         this._ardSelectedDisplayId = displayId;
 
+        // Use max possible dimensions so the request covers any display.
+        // The server clips to its actual framebuffer after processing SetDisplay.
+        const w = Math.max(this._fbWidth, this._ardCombinedFbWidth || 0);
+        const h = Math.max(this._fbHeight, this._ardCombinedFbHeight || 0);
         Log.Info("ARD selectDisplay(" +
-                 (combineAll ? "All" : "id=" + displayId) + ")");
+                 (combineAll ? "All" : "id=" + displayId) +
+                 ") " + w + "x" + h);
         this._sendEncodings();
         this._sendArdSetDisplay();
-        this._requestArdFullUpdate(this._fbWidth, this._fbHeight);
+        this._requestArdFullUpdate(w, h);
     }
 
     getImageData() {
