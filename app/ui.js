@@ -1163,6 +1163,11 @@ const UI = {
         UI.showStatus(msg);
         UI.updateVisualState('connected');
 
+        // Adapt modifier key labels for ARD (Mac) connections
+        if (UI.rfb && UI.rfb.isAppleARD) {
+            UI.applyMacKeyLabels();
+        }
+
         UI.updateBeforeUnload();
 
         // Do this last because it can only be used on rendered elements
@@ -1736,6 +1741,31 @@ const UI = {
         // See below
         UI.rfb.focus();
         UI.idleControlbar();
+    },
+
+    sendOptionCommandEsc() {
+        UI.rfb.sendOptionCommandEsc();
+        UI.rfb.focus();
+        UI.idleControlbar();
+    },
+
+    applyMacKeyLabels() {
+        const altBtn = document.getElementById('noVNC_toggle_alt_button');
+        altBtn.src = "app/images/opt.svg";
+        altBtn.alt = "Opt";
+        altBtn.title = "Toggle Option";
+
+        const winBtn = document.getElementById('noVNC_toggle_windows_button');
+        winBtn.src = "app/images/cmd.svg";
+        winBtn.alt = "Cmd";
+        winBtn.title = "Toggle Command";
+
+        const cadBtn = document.getElementById('noVNC_send_ctrl_alt_del_button');
+        cadBtn.src = "app/images/optcmdesc.svg";
+        cadBtn.alt = "Opt+Cmd+Esc";
+        cadBtn.title = "Send Option-Command-Escape";
+        cadBtn.removeEventListener('click', UI.sendCtrlAltDel);
+        cadBtn.addEventListener('click', UI.sendOptionCommandEsc);
     },
 
     sendKey(keysym, code, down) {

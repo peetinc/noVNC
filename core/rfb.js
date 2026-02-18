@@ -490,6 +490,8 @@ export default class RFB extends EventTargetMixin {
         this._resumeAuthentication();
     }
 
+    get isAppleARD() { return this._rfbAppleARD; }
+
     sendCtrlAltDel() {
         if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
         Log.Info("Sending Ctrl-Alt-Del");
@@ -500,6 +502,18 @@ export default class RFB extends EventTargetMixin {
         this.sendKey(KeyTable.XK_Delete, "Delete", false);
         this.sendKey(KeyTable.XK_Alt_L, "AltLeft", false);
         this.sendKey(KeyTable.XK_Control_L, "ControlLeft", false);
+    }
+
+    sendOptionCommandEsc() {
+        if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
+        Log.Info("Sending Option-Command-Escape");
+
+        this.sendKey(KeyTable.XK_Alt_L, "AltLeft", true);
+        this.sendKey(KeyTable.XK_Super_L, "MetaLeft", true);
+        this.sendKey(KeyTable.XK_Escape, "Escape", true);
+        this.sendKey(KeyTable.XK_Escape, "Escape", false);
+        this.sendKey(KeyTable.XK_Super_L, "MetaLeft", false);
+        this.sendKey(KeyTable.XK_Alt_L, "AltLeft", false);
     }
 
     machineShutdown() {
