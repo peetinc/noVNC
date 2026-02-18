@@ -1748,13 +1748,12 @@ const UI = {
         UI.idleControlbar();
     },
 
-    sendOptionCommandEsc() {
-        UI.rfb.sendOptionCommandEsc();
-        UI.rfb.focus();
-        UI.idleControlbar();
-    },
-
     applyMacKeyLabels() {
+        const ctrlBtn = document.getElementById('noVNC_toggle_ctrl_button');
+        ctrlBtn.src = "app/images/ctrl.svg";
+        ctrlBtn.alt = "Ctrl";
+        ctrlBtn.title = "Toggle Control";
+
         const altBtn = document.getElementById('noVNC_toggle_alt_button');
         altBtn.src = "app/images/opt.svg";
         altBtn.alt = "Opt";
@@ -1764,13 +1763,6 @@ const UI = {
         winBtn.src = "app/images/cmd.svg";
         winBtn.alt = "Cmd";
         winBtn.title = "Toggle Command";
-
-        const cadBtn = document.getElementById('noVNC_send_ctrl_alt_del_button');
-        cadBtn.src = "app/images/optcmdesc.svg";
-        cadBtn.alt = "Opt+Cmd+Esc";
-        cadBtn.title = "Send Option-Command-Escape";
-        cadBtn.removeEventListener('click', UI.sendCtrlAltDel);
-        cadBtn.addEventListener('click', UI.sendOptionCommandEsc);
     },
 
     sendKey(keysym, code, down) {
