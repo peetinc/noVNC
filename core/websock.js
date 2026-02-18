@@ -525,13 +525,15 @@ export default class Websock {
                 shaInput.set(cleartext.subarray(0, hashOffset), 4);
                 const computed = this._encSha1(shaInput);
                 const received = cleartext.slice(hashOffset, hashOffset + 20);
-                let match = true;
+                let diff = 0;
                 for (let i = 0; i < 20; i++) {
-                    if (computed[i] !== received[i]) { match = false; break; }
+                    diff |= computed[i] ^ received[i];
                 }
-                if (!match) {
-                    Log.Warn("ARD: SHA-1 mismatch on encrypted packet " +
-                             this._encRecvSeq);
+                if (diff !== 0) {
+                    Log.Error("ARD: SHA-1 mismatch on encrypted packet " +
+                              this._encRecvSeq + " — disconnecting");
+                    this.close();
+                    return;
                 }
             }
 

@@ -126,10 +126,20 @@ export class RSACipher {
     static parsePKCS1PublicKey(der) {
         let pos = 0;
 
+        function checkBounds(need) {
+            if (pos + need > der.length) {
+                throw new Error("DER truncated at offset " + pos +
+                                " (need " + need + ", have " +
+                                (der.length - pos) + ")");
+            }
+        }
+
         function readLength() {
+            checkBounds(1);
             let len = der[pos++];
             if (len & 0x80) {
                 const numBytes = len & 0x7f;
+                checkBounds(numBytes);
                 len = 0;
                 for (let i = 0; i < numBytes; i++) {
                     len = (len << 8) | der[pos++];
@@ -139,12 +149,14 @@ export class RSACipher {
         }
 
         function readInteger() {
+            checkBounds(1);
             if (der[pos++] !== 0x02) {
                 throw new Error("Expected INTEGER tag in DER");
             }
             let len = readLength();
+            checkBounds(len);
             // Strip leading zero sign byte
-            if (der[pos] === 0x00 && (der[pos + 1] & 0x80)) {
+            if (len >= 2 && der[pos] === 0x00 && (der[pos + 1] & 0x80)) {
                 pos++;
                 len--;
             }
@@ -154,6 +166,7 @@ export class RSACipher {
         }
 
         // Outer SEQUENCE
+        checkBounds(1);
         if (der[pos++] !== 0x30) {
             throw new Error("Expected SEQUENCE tag in DER");
         }
@@ -161,21 +174,26 @@ export class RSACipher {
 
         // Check if this is SPKI format (starts with SEQUENCE for AlgorithmIdentifier)
         // or bare PKCS#1 (starts with INTEGER for modulus)
+        checkBounds(1);
         if (der[pos] === 0x30) {
             // SPKI: SEQUENCE { AlgorithmIdentifier, BIT STRING { PKCS#1 key } }
             // Skip AlgorithmIdentifier SEQUENCE
             pos++; // consume 0x30 tag
             const algLen = readLength();
+            checkBounds(algLen);
             pos += algLen; // skip AlgorithmIdentifier contents
 
             // BIT STRING containing the PKCS#1 key
+            checkBounds(1);
             if (der[pos++] !== 0x03) {
                 throw new Error("Expected BIT STRING tag in SPKI");
             }
             readLength(); // bit string length
+            checkBounds(1);
             pos++; // skip unused-bits byte (always 0x00)
 
             // Inner SEQUENCE (the actual PKCS#1 key)
+            checkBounds(1);
             if (der[pos++] !== 0x30) {
                 throw new Error("Expected inner SEQUENCE tag in SPKI");
             }

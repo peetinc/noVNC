@@ -2125,6 +2125,10 @@ export default class RFB extends EventTargetMixin {
         if (this._ardRSATunnelStage === 4) {
             if (this._sock.rQwait("RSATunnel response", 4)) return false;
             const responseLen = this._sock.rQshift32();
+            if (responseLen > 4096) {
+                return this._fail("RSATunnel: response too large (" +
+                                  responseLen + " bytes)");
+            }
             if (responseLen > 0) {
                 if (this._sock.rQwait("RSATunnel response body", responseLen, 4)) return false;
                 const responseData = this._sock.rQshiftBytes(responseLen);
@@ -2172,6 +2176,10 @@ export default class RFB extends EventTargetMixin {
         if (this._ardRSATunnelStage === 1) {
             if (this._sock.rQwait("RSATunnel key response length", 4)) return false;
             const payloadLen = this._sock.rQshift32(); // u32 BE
+            if (payloadLen > 8192) {
+                return this._fail("RSATunnel: key response too large (" +
+                                  payloadLen + " bytes)");
+            }
 
             if (this._sock.rQwait("RSATunnel key response", payloadLen, 4)) return false;
             const payload = this._sock.rQshiftBytes(payloadLen);
@@ -3241,6 +3249,13 @@ export default class RFB extends EventTargetMixin {
             return true;
         }
 
+        if (uncompressedSize > 10 * 1024 * 1024) {
+            Log.Warn("ARD ClipboardSend: uncompressed size " +
+                     uncompressedSize + " exceeds 10MB limit, discarding");
+            this._sock.rQskipBytes(compressedSize);
+            return true;
+        }
+
         const zlibData = this._sock.rQshiftBytes(compressedSize);
 
         // Fresh Inflator per message (zlib state doesn't carry over)
@@ -3456,6 +3471,14 @@ export default class RFB extends EventTargetMixin {
                     Log.Info("ARD: server re-handshake — resetting to Security");
                     this._sock.sQpushString("RFB 003.889\n");
                     this._sock.flush();
+                    // Reset encryption and auth state for fresh re-auth
+                    this._ardDHKey = null;
+                    this._ardECBCipher = null;
+                    this._ardSessionKey = null;
+                    this._ardSessionIV = null;
+                    this._ardPendingEncryption = false;
+                    this._ardEncryptionEnabled = false;
+                    this._ardFirstDisplayInfo = true;
                     // Reset per-session display state; notify UI so stale
                     // display buttons are cleared while re-auth completes.
                     this._ardDisplays = [];
@@ -3472,11 +3495,6 @@ export default class RFB extends EventTargetMixin {
                 return true;
 
             default:
-                if (this._rfbAppleARD) {
-                    Log.Warn("ARD: unknown server message type 0x" +
-                             msgType.toString(16) + ", skipping");
-                    return true;
-                }
                 this._fail("Unexpected server message (type " + msgType + ")");
                 Log.Debug("sock.rQpeekBytes(30): " + this._sock.rQpeekBytes(30));
                 return true;
@@ -3868,7 +3886,13 @@ export default class RFB extends EventTargetMixin {
             rgba[dstOff + 3] = decompressed[alphaOffset + i]; // A
         }
 
-        // Cache and activate
+        // Cache and activate (LRU eviction at 100 entries)
+        const cacheKeys = Object.keys(this._ardCursorCache);
+        if (cacheKeys.length >= 100) {
+            const oldest = cacheKeys[0];
+            delete this._ardCursorCache[oldest];
+            delete this._ardCursorUrlCache[oldest];
+        }
         this._ardCursorCache[cursorId] = {
             rgba: rgba, hotx: hotx, hoty: hoty, w: w, h: h
         };
