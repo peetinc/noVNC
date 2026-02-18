@@ -620,11 +620,6 @@ export default class RFB extends EventTargetMixin {
     // Switch to a specific display or combined view.
     // combineAll: 1=all displays combined, 0=single display
     // displayId: display ID when combineAll=0
-    //
-    // Single display (combineAll=0): one-shot — send everything immediately.
-    // All displays (combineAll=1): two-phase — send SetDisplay, then
-    //   DisplayInfo2 handler sends FBUpdateReq + AutoFBUpdate after server
-    //   confirms the new composite layout.
     selectDisplay(combineAll, displayId) {
         if (this._rfbConnectionState !== 'connected' || !this._rfbAppleARD) {
             Log.Debug("ARD selectDisplay(" + combineAll + ", " + displayId +
@@ -635,26 +630,11 @@ export default class RFB extends EventTargetMixin {
         this._ardCombineAllDisplays = combineAll;
         this._ardSelectedDisplayId = displayId;
 
-        if (combineAll) {
-            // All displays: two-phase — let DisplayInfo2 handler do Phase 2
-            Log.Info("ARD selectDisplay(All) Phase 1: SetEncodings + SetDisplay");
-            this._sendEncodings();
-            this._sendArdSetDisplay();
-            this._sock.flush();
-        } else {
-            // Single display: one-shot with backing dimensions
-            const disp = this._ardDisplays.find(d => d.id === displayId);
-            const reqW = disp
-                ? (disp.backingWidth || disp.width) : this._fbWidth;
-            const reqH = disp
-                ? (disp.backingHeight || disp.height) : this._fbHeight;
-            Log.Info("ARD selectDisplay(id=" + displayId +
-                     ") one-shot " + reqW + "x" + reqH);
-            this._sendEncodings();
-            this._sendArdSetDisplay();
-            this._sendArdSetDisplay();  // native client sends twice
-            this._requestArdFullUpdate(reqW, reqH);
-        }
+        Log.Info("ARD selectDisplay(" +
+                 (combineAll ? "All" : "id=" + displayId) + ")");
+        this._sendEncodings();
+        this._sendArdSetDisplay();
+        this._requestArdFullUpdate(this._fbWidth, this._fbHeight);
     }
 
     getImageData() {
