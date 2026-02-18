@@ -162,6 +162,7 @@ export default class RFB extends EventTargetMixin {
         this._ardSelectedDisplayId = 0;    // display ID when combineAll=0
         this._ardCombinedFbWidth = 0;      // combined desktop width (from DisplayInfo2 header)
         this._ardCombinedFbHeight = 0;     // combined desktop height (from DisplayInfo2 header)
+        this._ardFirstDisplayInfo = true;  // first DisplayInfo2 needs double-tap
         this._rfbVeNCryptState = 0;
         this._rfbXvpVer = 0;
 
@@ -447,20 +448,10 @@ export default class RFB extends EventTargetMixin {
         if (this._rfbConnectionState === 'connected' && this._rfbAppleARD) {
             this._sendEncodings();
             this._sendArdSetDisplay();
-            // Use correct region dimensions matching the current display selection
-            const combineAll = this._ardCombineAllDisplays;
-            let reqW, reqH;
-            if (combineAll) {
-                reqW = this._ardCombinedFbWidth || this._fbWidth;
-                reqH = this._ardCombinedFbHeight || this._fbHeight;
-            } else {
-                const disp = this._ardDisplays.find(
-                    d => d.id === this._ardSelectedDisplayId);
-                reqW = disp ? disp.width  : this._fbWidth;
-                reqH = disp ? disp.height : this._fbHeight;
-            }
-            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, reqW, reqH);
-            this._sendArdAutoFBUpdate(1, 0, 0, reqW, reqH);
+            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                         this._fbWidth, this._fbHeight);
+            this._sendArdAutoFBUpdate(1, 0, 0,
+                                      this._fbWidth, this._fbHeight);
             this._sock.flush();
         }
     }
@@ -640,36 +631,44 @@ export default class RFB extends EventTargetMixin {
     // Switch to a specific display or combined view.
     // combineAll: 1=all displays combined, 0=single display
     // displayId: display ID when combineAll=0
+    //
+    // Single display (combineAll=0): one-shot — send everything immediately.
+    // All displays (combineAll=1): two-phase — send SetDisplay, then
+    //   DisplayInfo2 handler sends FBUpdateReq + AutoFBUpdate after server
+    //   confirms the new composite layout.
     selectDisplay(combineAll, displayId) {
         if (this._rfbConnectionState !== 'connected' || !this._rfbAppleARD) {
             Log.Info("ARD selectDisplay(" + combineAll + ", " + displayId +
                      ") skipped — state=" + this._rfbConnectionState);
             return;
         }
-        // Determine the correct framebuffer dimensions for this selection.
-        // combineAll=1 uses the combined desktop size; combineAll=0 looks up
-        // the target display's dimensions from the parsed display list.
-        // Using the wrong size here causes the server to auto-update the
-        // wrong region after SetDisplay.
-        let reqW, reqH;
-        if (combineAll) {
-            reqW = this._ardCombinedFbWidth || this._fbWidth;
-            reqH = this._ardCombinedFbHeight || this._fbHeight;
-        } else {
-            const disp = this._ardDisplays.find(d => d.id === displayId);
-            reqW = disp ? disp.width  : this._fbWidth;
-            reqH = disp ? disp.height : this._fbHeight;
-        }
 
-        Log.Info("ARD selectDisplay(combineAll=" + combineAll +
-                 " displayId=" + displayId + ") req=" + reqW + "x" + reqH);
         this._ardCombineAllDisplays = combineAll;
         this._ardSelectedDisplayId = displayId;
-        this._sendEncodings();
-        this._sendArdSetDisplay();
-        RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, reqW, reqH);
-        this._sendArdAutoFBUpdate(1, 0, 0, reqW, reqH);
-        this._sock.flush();
+
+        if (combineAll) {
+            // All displays: two-phase — let DisplayInfo2 handler do Phase 2
+            Log.Info("ARD selectDisplay(All) Phase 1: SetEncodings + SetDisplay");
+            this._sendEncodings();
+            this._sendArdSetDisplay();
+            this._sock.flush();
+        } else {
+            // Single display: one-shot with backing dimensions
+            const disp = this._ardDisplays.find(d => d.id === displayId);
+            const reqW = disp
+                ? (disp.backingWidth || disp.width) : this._fbWidth;
+            const reqH = disp
+                ? (disp.backingHeight || disp.height) : this._fbHeight;
+            Log.Info("ARD selectDisplay(id=" + displayId +
+                     ") one-shot " + reqW + "x" + reqH);
+            this._sendEncodings();
+            this._sendArdSetDisplay();
+            this._sendArdSetDisplay();  // native client sends twice
+            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                         reqW, reqH);
+            this._sendArdAutoFBUpdate(1, 0, 0, reqW, reqH);
+            this._sock.flush();
+        }
     }
 
     getImageData() {
@@ -2658,41 +2657,47 @@ export default class RFB extends EventTargetMixin {
         if (this._rfbAppleARD) {
             Log.Info("ARD init: fb=" + this._fbWidth + "x" + this._fbHeight +
                      " name=" + this._fbName);
-            // ARD init sequence (matches noARD):
+            // ARD init sequence (Phase 5 + 6):
             // ViewerInfo → SetMode → SetDisplay → AutoPasteboard
-            // → SetEncodings → PixelFormat → SetEncryption
-            // → FBUpdateRequest + AutoFBUpdate
-            Log.Info("ARD init [1/7] ViewerInfo");
+            // → SetEncodings → PixelFormat → SetEncodings → SetEncryption
+            // → FBUpdateRequest(incremental=0) → AutoFBUpdate
+            // Native macOS client sends SetEncodings twice: once before
+            // and once after SetPixelFormat.
+            Log.Info("ARD init [1/10] ViewerInfo");
             this._sendArdViewerInfo();
-            Log.Info("ARD init [2/7] SetMode(Control)");
+            Log.Info("ARD init [2/10] SetMode(Control)");
             this._sendArdSetMode(1);       // 1=Control
-            Log.Info("ARD init [3/7] SetDisplay(combineAll=1)");
+            Log.Info("ARD init [3/10] SetDisplay(combineAll=1)");
             this._sendArdSetDisplay();
-            Log.Info("ARD init [4/8] AutoPasteboard(1)");
+            Log.Info("ARD init [4/10] AutoPasteboard(1)");
             this._sendArdAutoPasteboard(1);
-            Log.Info("ARD init [5/8] SetEncodings(preset=" + this._ardQualityPreset + ")");
+            Log.Info("ARD init [5/10] SetEncodings(preset=" + this._ardQualityPreset + ")");
             this._sendEncodings();
-            Log.Info("ARD init [6/8] PixelFormat(32bpp depth=" + this._fbDepth + ")");
+            Log.Info("ARD init [6/10] PixelFormat(32bpp depth=" + this._fbDepth + ")");
             RFB.messages.pixelFormat(this._sock, this._fbDepth, true, 16, 8, 0);
+            Log.Info("ARD init [7/10] SetEncodings(repeat)");
+            this._sendEncodings();
 
             if (this._ardDHKey) {
-                Log.Info("ARD init [7/8] SetEncryption(request)");
+                Log.Info("ARD init [8/10] SetEncryption(request)");
                 RFB.messages.appleSetEncryption(this._sock, 1);
             } else {
-                Log.Info("ARD init [7/8] SetEncryption skipped (no DH key)");
+                Log.Info("ARD init [8/10] SetEncryption skipped (no DH key)");
             }
 
-            Log.Info("ARD init [8/8] FBUpdateRequest(full " +
-                     this._fbWidth + "x" + this._fbHeight + ") + AutoFBUpdate");
+            Log.Info("ARD init [9/10] FBUpdateRequest(full " +
+                     this._fbWidth + "x" + this._fbHeight + ")");
             RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
                                          this._fbWidth, this._fbHeight);
-            this._sendArdAutoFBUpdate(
-                1, 0, 0, this._fbWidth, this._fbHeight);
+            Log.Info("ARD init [10/10] AutoFBUpdate(enable)");
+            this._sendArdAutoFBUpdate(1, 0, 0,
+                                      this._fbWidth, this._fbHeight);
 
             // Set default arrow cursor and track first-FBU cursor delivery
             this._ardActiveCursor = { type: 'system', id: 0 };
             this._setArdSystemCursor(0);
             this._ardGotCursor = false;
+            this._ardFirstDisplayInfo = true;
         } else {
             RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
             this._sendEncodings();
@@ -2707,22 +2712,20 @@ export default class RFB extends EventTargetMixin {
     _sendEncodings() {
         if (this._rfbAppleARD) {
             const presetEncodings = {
-                halftone: [1000, 16, 6, 0],
-                gray: [1001, 16, 6, 0],
-                thousands: [1002, 16, 6, 0],
-                millions: [16, 6, 0],
+                halftone: [1000, 16, 6],
+                gray: [1001, 16, 6],
+                thousands: [1002, 16, 6],
+                millions: [16, 6],
             };
-            const encs = presetEncodings[this._ardQualityPreset] || presetEncodings.millions;
-            encs.push(encodings.pseudoEncodingDesktopSize);
+            const encs = (presetEncodings[this._ardQualityPreset] ||
+                          presetEncodings.millions).slice();
+            encs.push(encodings.pseudoEncodingCursor);
             encs.push(encodings.pseudoEncodingArdCursorAlpha);
             encs.push(encodings.pseudoEncodingArdCursorPos);
-            encs.push(encodings.pseudoEncodingCursor);
-            encs.push(encodings.pseudoEncodingLastRect);
-            encs.push(encodings.pseudoEncodingQEMUExtendedKeyEvent);
-            encs.push(encodings.pseudoEncodingExtendedDesktopSize);
-            encs.push(encodings.pseudoEncodingArdSessionEncryption);
+            encs.push(encodings.pseudoEncodingDesktopSize);
             encs.push(encodings.pseudoEncodingArdDisplayInfo);
             encs.push(encodings.pseudoEncodingArdDisplayInfo2);
+            encs.push(encodings.pseudoEncodingArdSessionEncryption);
             RFB.messages.clientEncodings(this._sock, encs);
             return;
         }
@@ -3575,6 +3578,16 @@ export default class RFB extends EventTargetMixin {
                          this._fbHeight + " -> " + this._FBU.width +
                          "x" + this._FBU.height);
                 this._resize(this._FBU.width, this._FBU.height);
+                // ARD: after resize request a full (non-incremental) frame at
+                // the new dimensions so the server sends a clean I-frame
+                // baseline before resuming delta pushes via AutoFBUpdate.
+                if (this._rfbAppleARD) {
+                    RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                                 this._fbWidth, this._fbHeight);
+                    this._sendArdAutoFBUpdate(
+                        1, 0, 0, this._fbWidth, this._fbHeight);
+                    this._sock.flush();
+                }
                 return true;
 
             case encodings.pseudoEncodingExtendedDesktopSize:
@@ -4000,9 +4013,9 @@ export default class RFB extends EventTargetMixin {
         const displayFlags = this._sock.rQshift32() >>> 0;
         const displayCount = this._sock.rQshift16();
 
-        // Store combined desktop dimensions for use when switching back to "All"
-        this._ardCombinedFbWidth = fbWidth;
-        this._ardCombinedFbHeight = fbHeight;
+        // Store combined desktop dimensions (scaled = actual framebuffer size)
+        this._ardCombinedFbWidth = scaledW;
+        this._ardCombinedFbHeight = scaledH;
 
         Log.Info("ArdDisplayInfo2: v" + version +
                  " fb=" + fbWidth + "x" + fbHeight +
@@ -4048,6 +4061,8 @@ export default class RFB extends EventTargetMixin {
                 id: dId,
                 width: dRight - dLeft,
                 height: dBottom - dTop,
+                backingWidth: bRight - bLeft,
+                backingHeight: bBottom - bTop,
                 backingScale: backingScale,
                 displayScale: displayScale,
                 primary: isPrimary
@@ -4072,6 +4087,54 @@ export default class RFB extends EventTargetMixin {
         this.dispatchEvent(new CustomEvent(
             "arddisplaylist",
             { detail: { displays: this._ardDisplays } }));
+
+        // When the display config changes mid-session (monitor plugged in
+        // or removed), the server stops sending FBUs until we acknowledge
+        // the new layout.  Re-send SetEncodings + SetDisplay + a full
+        // FBUpdateRequest so the server resumes streaming.
+        // Only do this when the combined size actually changed to avoid
+        // an infinite loop (every FBU can carry DisplayInfo2).
+        const prevW = this._ardPrevCombinedW || 0;
+        const prevH = this._ardPrevCombinedH || 0;
+        this._ardPrevCombinedW = scaledW;
+        this._ardPrevCombinedH = scaledH;
+
+        // Resize canvas when the server's framebuffer dimensions change.
+        // The server sends DisplayInfo2 (not DesktopSize) on display switch.
+        if (scaledW !== this._fbWidth || scaledH !== this._fbHeight) {
+            Log.Info("ArdDisplayInfo2: resizing canvas " +
+                     this._fbWidth + "x" + this._fbHeight +
+                     " → " + scaledW + "x" + scaledH);
+            this._resize(scaledW, scaledH);
+        }
+
+        // Phase 2: after the server confirms the layout via DisplayInfo2,
+        // send SetDisplay + FBUpdateReq + AutoFBUpdate at the server-confirmed
+        // dimensions.  This matches the native client's two-phase protocol.
+        //
+        // Triggers on:
+        //   - First DisplayInfo2 after connect (kicks pixel streaming)
+        //   - Dimension change (display switch confirmed, or monitor plug/unplug)
+        const dimensionsChanged = this._rfbConnectionState === 'connected' &&
+            (scaledW !== prevW || scaledH !== prevH) && prevW > 0;
+
+        if (this._ardFirstDisplayInfo || dimensionsChanged) {
+            if (this._ardFirstDisplayInfo) {
+                Log.Info("ArdDisplayInfo2: Phase 2 (first after connect) " +
+                         scaledW + "x" + scaledH);
+            } else {
+                Log.Info("ArdDisplayInfo2: Phase 2 (config changed " +
+                         prevW + "x" + prevH + " → " +
+                         scaledW + "x" + scaledH + ")");
+            }
+            this._ardFirstDisplayInfo = false;
+            this._sendEncodings();
+            this._sendArdSetDisplay();
+            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                         scaledW, scaledH);
+            this._sendArdAutoFBUpdate(1, 0, 0, scaledW, scaledH);
+            this._sock.flush();
+        }
 
         Log.Info("ArdDisplayInfo2: " + scaledW + "x" + scaledH +
                  " displays=" + this._ardDisplays.length);
