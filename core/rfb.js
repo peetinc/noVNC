@@ -635,6 +635,9 @@ export default class RFB extends EventTargetMixin {
                  ") fb=" + this._fbWidth + "x" + this._fbHeight);
         this._sendEncodings();
         this._sendArdSetDisplay();
+        if (!combineAll) {
+            this._sendArdSetDisplay();  // native client sends twice for single display
+        }
         this._requestArdFullUpdate(this._fbWidth, this._fbHeight);
     }
 
