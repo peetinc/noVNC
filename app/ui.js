@@ -121,6 +121,7 @@ const UI = {
         UI.addTouchSpecificHandlers();
         UI.addExtraKeysHandlers();
         UI.addDisplaySelectHandlers();
+        UI.addQualitySelectHandlers();
         UI.addMachineHandlers();
         UI.addConnectionControlHandlers();
         UI.addClipboardHandlers();
@@ -873,6 +874,7 @@ const UI = {
         UI.closeClipboardPanel();
         UI.closeExtraKeys();
         UI.closeDisplaySelect();
+        UI.closeQualitySelect();
     },
 
 /* ------^-------
@@ -1894,6 +1896,107 @@ const UI = {
 
 /* ------^-------
  *  /DISPLAY SELECT
+ * ==============
+ *  QUALITY SELECT
+ * ------v------*/
+
+    addQualitySelectHandlers() {
+        document.getElementById('noVNC_quality_button')
+            .addEventListener('click', UI.toggleQualitySelect);
+        const track = document.getElementById('noVNC_quality_track');
+        track.addEventListener('pointerdown', UI.qualityDragStart);
+    },
+
+    openQualitySelect() {
+        UI.closeAllPanels();
+        UI.openControlbar();
+        document.getElementById('noVNC_quality_panel')
+            .classList.add("noVNC_open");
+        document.getElementById('noVNC_quality_button')
+            .classList.add("noVNC_selected");
+        UI.syncQualityStops();
+    },
+
+    closeQualitySelect() {
+        document.getElementById('noVNC_quality_panel')
+            .classList.remove("noVNC_open");
+        document.getElementById('noVNC_quality_button')
+            .classList.remove("noVNC_selected");
+    },
+
+    toggleQualitySelect() {
+        if (document.getElementById('noVNC_quality_panel')
+            .classList.contains("noVNC_open")) {
+            UI.closeQualitySelect();
+        } else {
+            UI.openQualitySelect();
+        }
+    },
+
+    syncQualityStops() {
+        const preset = UI.rfb ? UI.rfb._ardQualityPreset : 'thousands';
+        document.querySelectorAll('.noVNC_quality_stop')
+            .forEach((s) => {
+                s.classList.toggle('noVNC_active',
+                                   s.dataset.preset === preset);
+            });
+    },
+
+    // Map a pointer Y position to the nearest quality preset
+    _qualityFromY(track, clientY) {
+        const rect = track.getBoundingClientRect();
+        const ratio = (clientY - rect.top) / rect.height;
+        const clamped = Math.max(0, Math.min(1, ratio));
+        // Top=millions(0), bottom=halftone(3) — 4 zones
+        const presets = ['millions', 'thousands', 'gray', 'halftone'];
+        const idx = Math.min(3, Math.floor(clamped * 4));
+        return presets[idx];
+    },
+
+    qualityDragStart(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        const track = document.getElementById('noVNC_quality_track');
+        track.setPointerCapture(e.pointerId);
+
+        // Show visual preview immediately, but don't send to server yet
+        let pending = UI._qualityFromY(track, e.clientY);
+        UI._showQualityPreview(pending);
+
+        const onMove = (ev) => {
+            ev.preventDefault();
+            pending = UI._qualityFromY(track, ev.clientY);
+            UI._showQualityPreview(pending);
+        };
+        const onUp = (ev) => {
+            pending = UI._qualityFromY(track, ev.clientY);
+            // Send to server only on release
+            if (UI.rfb) {
+                UI.rfb.qualityPreset = pending;
+            }
+            UI.syncQualityStops();
+            track.releasePointerCapture(ev.pointerId);
+            track.removeEventListener('pointermove', onMove);
+            track.removeEventListener('pointerup', onUp);
+            track.removeEventListener('lostpointercapture', onUp);
+        };
+
+        track.addEventListener('pointermove', onMove);
+        track.addEventListener('pointerup', onUp);
+        track.addEventListener('lostpointercapture', onUp);
+    },
+
+    // Visual-only preview during drag (no server communication)
+    _showQualityPreview(preset) {
+        document.querySelectorAll('.noVNC_quality_stop')
+            .forEach((s) => {
+                s.classList.toggle('noVNC_active',
+                                   s.dataset.preset === preset);
+            });
+    },
+
+/* ------^-------
+ *  /QUALITY SELECT
  * ==============
  *     MISC
  * ------v------*/

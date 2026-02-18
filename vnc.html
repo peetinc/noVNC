@@ -172,6 +172,27 @@
             </div>
             </div>
 
+            <!-- Quality selector (ARD quality presets) -->
+            <input type="image" alt="Image quality" src="app/images/quality.svg"
+                id="noVNC_quality_button" class="noVNC_button"
+                title="Image quality">
+            <div class="noVNC_vcenter">
+            <div id="noVNC_quality_panel" class="noVNC_panel">
+                <div id="noVNC_quality_wrap">
+                    <img src="app/images/quality-high.svg" alt="High"
+                        class="noVNC_quality_icon">
+                    <div id="noVNC_quality_track">
+                        <div class="noVNC_quality_stop" data-preset="millions"></div>
+                        <div class="noVNC_quality_stop" data-preset="thousands"></div>
+                        <div class="noVNC_quality_stop" data-preset="gray"></div>
+                        <div class="noVNC_quality_stop" data-preset="halftone"></div>
+                    </div>
+                    <img src="app/images/quality-low.svg" alt="Low"
+                        class="noVNC_quality_icon">
+                </div>
+            </div>
+            </div>
+
             <!-- Shutdown/Reboot -->
             <input type="image" alt="Shutdown/Reboot" src="app/images/power.svg"
                 id="noVNC_power_button" class="noVNC_button"

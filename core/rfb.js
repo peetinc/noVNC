@@ -148,7 +148,7 @@ export default class RFB extends EventTargetMixin {
         this._ardEncryptionEnabled = false;
         this._ardRSATunnelStage = 0;
         this._ardRSAServerKey = null;
-        this._ardQualityPreset = 'millions';
+        this._ardQualityPreset = 'thousands';
         this._ardClipboardSessionId = 0;
         this._ardLastClipboardSent = null;
         this._ardLastClipboardRecv = null;
