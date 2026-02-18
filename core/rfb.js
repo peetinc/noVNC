@@ -158,7 +158,7 @@ export default class RFB extends EventTargetMixin {
         this._ardActiveCursor = null;    // {type:'system'|'custom', id}
         this._ardGotCursor = false;      // track if cursor data received in first FBU
         this._ardDisplays = [];            // per-display geometry from DisplayInfo/DisplayInfo2
-        this._ardCombineAllDisplays = 1;   // 1=all displays combined by default
+        this._ardCombineAllDisplays = 1;   // 1 for init; auto-selects lowest display on first DisplayInfo2
         this._ardSelectedDisplayId = 0;    // display ID when combineAll=0
         this._ardCombinedFbWidth = 0;      // combined desktop width (from DisplayInfo2 header)
         this._ardCombinedFbHeight = 0;     // combined desktop height (from DisplayInfo2 header)
@@ -4108,6 +4108,17 @@ export default class RFB extends EventTargetMixin {
 
         if (this._ardFirstDisplayInfo || dimensionsChanged) {
             if (this._ardFirstDisplayInfo) {
+                // Auto-select the lowest-numbered display on connect
+                if (this._ardDisplays.length > 0) {
+                    const lowest = this._ardDisplays.reduce(
+                        (a, b) => (a.id < b.id ? a : b));
+                    this._ardCombineAllDisplays = 0;
+                    this._ardSelectedDisplayId = lowest.id;
+                    Log.Info("ArdDisplayInfo2: auto-selecting display " +
+                             lowest.id + " (" + (lowest.backingWidth ||
+                             lowest.width) + "x" + (lowest.backingHeight ||
+                             lowest.height) + ")");
+                }
                 Log.Info("ArdDisplayInfo2: Phase 2 (first after connect) " +
                          scaledW + "x" + scaledH);
             } else {
