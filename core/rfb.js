@@ -163,6 +163,7 @@ export default class RFB extends EventTargetMixin {
         this._ardCombinedFbWidth = 0;      // combined desktop width (from DisplayInfo2 header)
         this._ardCombinedFbHeight = 0;     // combined desktop height (from DisplayInfo2 header)
         this._ardFirstDisplayInfo = true;  // first DisplayInfo2 needs double-tap
+        this._ardDisplaySwitchPending = false; // waiting for DisplayInfo2 to confirm switch
         this._ardLastClipboardReqTime = 0;
         this._ardPrevCombinedW = 0;
         this._ardPrevCombinedH = 0;
@@ -630,15 +631,14 @@ export default class RFB extends EventTargetMixin {
         this._ardCombineAllDisplays = combineAll;
         this._ardSelectedDisplayId = displayId;
 
-        Log.Info("ARD selectDisplay(" +
-                 (combineAll ? "All" : "id=" + displayId) +
-                 ") fb=" + this._fbWidth + "x" + this._fbHeight);
+        Log.Info("ARD selectDisplay(" + (combineAll ? "All" : "id=" + displayId) + ")");
+        this._ardDisplaySwitchPending = true;
         this._sendEncodings();
         this._sendArdSetDisplay();
         if (!combineAll) {
             this._sendArdSetDisplay();  // native client sends twice for single display
         }
-        this._requestArdFullUpdate(this._fbWidth, this._fbHeight);
+        this._sock.flush();
     }
 
     getImageData() {
@@ -2672,6 +2672,7 @@ export default class RFB extends EventTargetMixin {
             this._setArdSystemCursor(0);
             this._ardGotCursor = false;
             this._ardFirstDisplayInfo = true;
+            this._ardDisplaySwitchPending = false;
         } else {
             RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
             this._sendEncodings();
@@ -3466,6 +3467,7 @@ export default class RFB extends EventTargetMixin {
                     this._ardPendingEncryption = false;
                     this._ardEncryptionEnabled = false;
                     this._ardFirstDisplayInfo = true;
+                    this._ardDisplaySwitchPending = false;
                     // Reset per-session display state; notify UI so stale
                     // display buttons are cleared while re-auth completes.
                     this._ardDisplays = [];
@@ -4109,17 +4111,19 @@ export default class RFB extends EventTargetMixin {
 
         // Phase 2: after the server confirms the layout via DisplayInfo2,
         // send SetDisplay + FBUpdateReq + AutoFBUpdate at the server-confirmed
-        // dimensions.  This matches the native client's two-phase protocol.
-        //
-        // Triggers on:
+        // dimensions.  Triggers on:
         //   - First DisplayInfo2 after connect (kicks pixel streaming)
-        //   - Dimension change (display switch confirmed, or monitor plug/unplug)
+        //   - Pending display switch (selectDisplay sets _ardDisplaySwitchPending)
+        //   - Dimension change (monitor plug/unplug)
         const dimensionsChanged = this._rfbConnectionState === 'connected' &&
             (scaledW !== prevW || scaledH !== prevH) && prevW > 0;
 
-        if (this._ardFirstDisplayInfo || dimensionsChanged) {
+        if (this._ardFirstDisplayInfo || this._ardDisplaySwitchPending || dimensionsChanged) {
             if (this._ardFirstDisplayInfo) {
                 Log.Info("ArdDisplayInfo2: Phase 2 (first after connect) " +
+                         scaledW + "x" + scaledH);
+            } else if (this._ardDisplaySwitchPending) {
+                Log.Info("ArdDisplayInfo2: Phase 2 (display switch confirmed) " +
                          scaledW + "x" + scaledH);
             } else {
                 Log.Info("ArdDisplayInfo2: Phase 2 (config changed " +
@@ -4127,6 +4131,7 @@ export default class RFB extends EventTargetMixin {
                          scaledW + "x" + scaledH + ")");
             }
             this._ardFirstDisplayInfo = false;
+            this._ardDisplaySwitchPending = false;
             this._sendEncodings();
             this._sendArdSetDisplay();
             this._requestArdFullUpdate(scaledW, scaledH);
