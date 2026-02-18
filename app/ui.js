@@ -1882,9 +1882,7 @@ const UI = {
 
         container.appendChild(makeBtn('All', 1, 0));
         sorted.forEach((d, i) => {
-            const el = makeBtn(String(i + 1), 0, d.id);
-            if (i === 0) { el.classList.add('noVNC_selected'); }
-            container.appendChild(el);
+            container.appendChild(makeBtn(String(i + 1), 0, d.id));
         });
     },
 
