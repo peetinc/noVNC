@@ -158,8 +158,8 @@ export default class RFB extends EventTargetMixin {
         this._ardActiveCursor = null;    // {type:'system'|'custom', id}
         this._ardGotCursor = false;      // track if cursor data received in first FBU
         this._ardDisplays = [];            // per-display geometry from DisplayInfo/DisplayInfo2
-        this._ardCombineAllDisplays = 1;   // 1=all displays combined by default
-        this._ardSelectedDisplayId = 0;    // display ID when combineAll=0
+        this._ardCombineAllDisplays = 1;   // 1=All displays (combined view)
+        this._ardSelectedDisplayId = 0;    // 0=no specific display (All)
         this._ardCombinedFbWidth = 0;      // combined desktop width (from DisplayInfo2 header)
         this._ardCombinedFbHeight = 0;     // combined desktop height (from DisplayInfo2 header)
         this._ardFirstDisplayInfo = true;  // first DisplayInfo2 needs double-tap
@@ -167,6 +167,7 @@ export default class RFB extends EventTargetMixin {
         this._ardLastClipboardReqTime = 0;
         this._ardPrevCombinedW = 0;
         this._ardPrevCombinedH = 0;
+        this._ardPrevDisplayCount = 0;
         this._rfbVeNCryptState = 0;
         this._rfbXvpVer = 0;
 
@@ -209,6 +210,7 @@ export default class RFB extends EventTargetMixin {
         this._disconnTimer = null;      // disconnection timer
         this._resizeTimeout = null;     // resize rate limiting
         this._mouseMoveTimer = null;
+        this._authTimer = null;         // auth response timeout
 
         // Decoder states
         this._decoders = {};
@@ -635,13 +637,24 @@ export default class RFB extends EventTargetMixin {
                  (combineAll ? "All" : "id=" + displayId) + ")");
         this._sendArdSetDisplay();
         if (!combineAll) {
-            this._sendArdSetDisplay();  // native client sends twice for single display
+            this._sendArdSetDisplay();  // native ARD client sends twice for single display
         }
         RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
         this._sendArdSetServerScaling(1.0);
         this._sock.flush();
         // Phase 2/3 in _handleArdDisplayInfo2 will send FBUpdateRequest
         // once the server confirms the new layout via DisplayInfo2.
+    }
+
+    requestFullUpdate() {
+        if (this._rfbConnectionState !== 'connected') return;
+        if (this._rfbAppleARD) {
+            this._requestArdFullUpdate(this._fbWidth, this._fbHeight);
+        } else {
+            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                         this._fbWidth, this._fbHeight);
+        }
+        this._sock.flush();
     }
 
     getImageData() {
@@ -746,6 +759,8 @@ export default class RFB extends EventTargetMixin {
         }
         clearTimeout(this._resizeTimeout);
         clearTimeout(this._mouseMoveTimer);
+        clearTimeout(this._authTimer);
+        this._authTimer = null;
         Log.Debug("<< RFB.disconnect");
     }
 
@@ -2519,6 +2534,9 @@ export default class RFB extends EventTargetMixin {
     _handleSecurityResult() {
         if (this._sock.rQwait('VNC auth response ', 4)) { return false; }
 
+        clearTimeout(this._authTimer);
+        this._authTimer = null;
+
         const status = this._sock.rQshift32();
 
         if (status === 0) { // OK
@@ -2644,7 +2662,7 @@ export default class RFB extends EventTargetMixin {
             this._sendArdViewerInfo();
             Log.Info("ARD init [2/10] SetMode(Control)");
             this._sendArdSetMode(1);       // 1=Control
-            Log.Info("ARD init [3/10] SetDisplay(combineAll=1)");
+            Log.Info("ARD init [3/10] SetDisplay(combineAll=1, All)");
             this._sendArdSetDisplay();
             Log.Info("ARD init [4/10] AutoPasteboard(1)");
             this._sendArdAutoPasteboard(1);
@@ -2662,13 +2680,22 @@ export default class RFB extends EventTargetMixin {
                 Log.Info("ARD init [8/10] SetEncryption skipped (no DH key)");
             }
 
-            Log.Info("ARD init [9/10] FBUpdateRequest(full " +
-                     this._fbWidth + "x" + this._fbHeight + ")");
+            Log.Info("ARD init [9/11] FBUpdateRequest(full)");
             RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
                                          this._fbWidth, this._fbHeight);
-            Log.Info("ARD init [10/10] AutoFBUpdate(enable)");
+            Log.Info("ARD init [10/11] AutoFBUpdate(enable)");
             this._sendArdAutoFBUpdate(1, 0, 0,
                                       this._fbWidth, this._fbHeight);
+            this._sock.flush();
+            setTimeout(() => {
+                if (this._rfbConnectionState !== 'connected') return;
+                Log.Info("ARD init [11/11] FBUpdateRequest+AutoFBUpdate(delayed 50ms)");
+                RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                             this._fbWidth, this._fbHeight);
+                this._sendArdAutoFBUpdate(1, 0, 0,
+                                          this._fbWidth, this._fbHeight);
+                this._sock.flush();
+            }, 50);
 
             // Set default arrow cursor and track first-FBU cursor delivery
             this._ardActiveCursor = { type: 'system', id: 0 };
@@ -2771,6 +2798,12 @@ export default class RFB extends EventTargetMixin {
                 return this._negotiateAuthentication();
 
             case 'SecurityResult':
+                if (!this._authTimer) {
+                    this._authTimer = setTimeout(() => {
+                        this._authTimer = null;
+                        this._fail("Authentication timed out");
+                    }, 10000);
+                }
                 return this._handleSecurityResult();
 
             case 'SecurityReason':
@@ -3149,6 +3182,12 @@ export default class RFB extends EventTargetMixin {
         RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, w, h);
         this._sendArdAutoFBUpdate(1, 0, 0, w, h);
         this._sock.flush();
+        setTimeout(() => {
+            if (this._rfbConnectionState !== 'connected') return;
+            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, w, h);
+            this._sendArdAutoFBUpdate(1, 0, 0, w, h);
+            this._sock.flush();
+        }, 50);
     }
 
     // ARD StateChange (0x14)
@@ -3419,6 +3458,8 @@ export default class RFB extends EventTargetMixin {
                         this._sendEncodings();
                         RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
                                                      this._fbWidth, this._fbHeight);
+                        this._sendArdAutoFBUpdate(1, 0, 0,
+                                                  this._fbWidth, this._fbHeight);
                     } else {
                         RFB.messages.fbUpdateRequest(this._sock, true, 0, 0,
                                                      this._fbWidth, this._fbHeight);
@@ -3563,6 +3604,8 @@ export default class RFB extends EventTargetMixin {
             this._enableStreamEncryption();
             RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
                                          this._fbWidth, this._fbHeight);
+            this._sendArdAutoFBUpdate(1, 0, 0,
+                                      this._fbWidth, this._fbHeight);
         }
 
         return true;  // We finished this FBU
@@ -3993,6 +4036,9 @@ export default class RFB extends EventTargetMixin {
                       " magic=0x" + magic.toString(16));
         }
 
+        Log.Debug("ArdDisplayInfo: arddisplaylist count=" +
+                  this._ardDisplays.length + " ids=[" +
+                  this._ardDisplays.map(d => d.id).join(",") + "]");
         this.dispatchEvent(new CustomEvent(
             "arddisplaylist",
             { detail: { displays: this._ardDisplays } }));
@@ -4104,6 +4150,9 @@ export default class RFB extends EventTargetMixin {
             this._sock.rQskipBytes(leftover);
         }
 
+        Log.Debug("ArdDisplayInfo2: arddisplaylist count=" +
+                  this._ardDisplays.length + " ids=[" +
+                  this._ardDisplays.map(d => d.id).join(",") + "]");
         this.dispatchEvent(new CustomEvent(
             "arddisplaylist",
             { detail: { displays: this._ardDisplays } }));
@@ -4116,8 +4165,10 @@ export default class RFB extends EventTargetMixin {
         // an infinite loop (every FBU can carry DisplayInfo2).
         const prevW = this._ardPrevCombinedW || 0;
         const prevH = this._ardPrevCombinedH || 0;
+        const prevCount = this._ardPrevDisplayCount;
         this._ardPrevCombinedW = scaledW;
         this._ardPrevCombinedH = scaledH;
+        this._ardPrevDisplayCount = this._ardDisplays.length;
 
         // Resize canvas when the server's framebuffer dimensions change.
         // The server sends DisplayInfo2 (not DesktopSize) on display switch.
@@ -4126,6 +4177,9 @@ export default class RFB extends EventTargetMixin {
                      this._fbWidth + "x" + this._fbHeight +
                      " → " + scaledW + "x" + scaledH);
             this._resize(scaledW, scaledH);
+            // Clear stale image so old display content doesn't show
+            // during the brief window before new FBUs arrive.
+            this._display.fillRect(0, 0, scaledW, scaledH, [0, 0, 0]);
         }
 
         // Phase 2: server confirmed layout change via DisplayInfo2.
@@ -4137,8 +4191,20 @@ export default class RFB extends EventTargetMixin {
         // Triggers on:
         //   - First DisplayInfo2 after connect (kicks pixel streaming)
         //   - Dimension change (display switch confirmed, or monitor plug/unplug)
+        //   - Display count change (monitor added/removed without dimension change)
+        const displayCountChanged = this._rfbConnectionState === 'connected' &&
+            prevCount > 0 && this._ardDisplays.length !== prevCount;
         const dimensionsChanged = this._rfbConnectionState === 'connected' &&
             (scaledW !== prevW || scaledH !== prevH) && prevW > 0;
+
+        // If count changed but dimensions didn't, fire a full update directly
+        // to unfreeze the stream (no Phase 2/3 needed — layout is already stable).
+        if (displayCountChanged && !dimensionsChanged && !this._ardFirstDisplayInfo) {
+            Log.Info("ArdDisplayInfo2: display count changed " +
+                     prevCount + " → " + this._ardDisplays.length +
+                     ", refreshing stream");
+            this._requestArdFullUpdate(scaledW, scaledH);
+        }
 
         if (this._ardFirstDisplayInfo || dimensionsChanged) {
             if (this._ardFirstDisplayInfo) {
@@ -4153,7 +4219,17 @@ export default class RFB extends EventTargetMixin {
             this._sendArdSetDisplay();
             RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
             this._sock.flush();
-            this._ardPhase3Pending = true;
+            if (this._ardCombineAllDisplays) {
+                // Server does not echo a second DI2 for the All-displays view —
+                // go straight to Phase 3 instead of waiting indefinitely.
+                Log.Info("ArdDisplayInfo2: Phase 3 (requesting frame, All view) " +
+                         scaledW + "x" + scaledH);
+                this._ardPhase3Pending = false;
+                this._sendArdSetServerScaling(1.0);
+                this._requestArdFullUpdate(scaledW, scaledH);
+            } else {
+                this._ardPhase3Pending = true;
+            }
         } else if (this._ardPhase3Pending) {
             // Phase 3: server's echo DI2 arrived — display config is now
             // stable. Send SetServerScaling(1.0) then request pixel data.

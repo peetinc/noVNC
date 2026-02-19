@@ -121,6 +121,7 @@ const UI = {
         UI.addTouchSpecificHandlers();
         UI.addExtraKeysHandlers();
         UI.addDisplaySelectHandlers();
+        UI.addKeyboardShortcutHandlers();
         UI.addQualitySelectHandlers();
         UI.addMachineHandlers();
         UI.addConnectionControlHandlers();
@@ -1796,6 +1797,26 @@ const UI = {
             .addEventListener('click', UI.toggleDisplaySelect);
     },
 
+    // Double-tap backtick (` `) triggers a full framebuffer refresh.
+    // First tap passes through normally; second tap within 300 ms is
+    // intercepted (not forwarded to the remote) and fires requestFullUpdate.
+    _lastBacktickMs: 0,
+
+    addKeyboardShortcutHandlers() {
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== '`') return;
+            const now = Date.now();
+            const elapsed = now - UI._lastBacktickMs;
+            UI._lastBacktickMs = now;
+            if (elapsed < 300 && UI.rfb) {
+                e.stopPropagation();
+                e.preventDefault();
+                UI._lastBacktickMs = 0; // reset so triple-tap doesn't re-fire
+                UI.rfb.requestFullUpdate();
+            }
+        }, true); // capture phase — fires before rfb canvas handler
+    },
+
     openDisplaySelect() {
         UI.closeAllPanels();
         UI.openControlbar();
@@ -1838,6 +1859,7 @@ const UI = {
 
     ardDisplayListUpdated(e) {
         const displays = e.detail.displays;
+
         const container = document.getElementById('noVNC_display_select_buttons');
         const btn = document.getElementById('noVNC_display_select_button');
 
@@ -1874,7 +1896,6 @@ const UI = {
                 container.querySelectorAll('.noVNC_button')
                     .forEach(b => b.classList.remove('noVNC_selected'));
                 el.classList.add('noVNC_selected');
-                UI.closeDisplaySelect();
                 UI.rfb.focus();
             });
             return el;
