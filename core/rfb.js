@@ -150,6 +150,8 @@ export default class RFB extends EventTargetMixin {
         this._ardRSAServerKey = null;
         this._ardQualityPreset = 'thousands';
         this._ardClipboardSessionId = 0;
+        this._ardClipboardSyncEnabled = true;  // mirrors init AutoPasteboard(1)
+        this._ardClipboardManualRequest = false; // one-shot: honour reply even when sync off
         this._ardLastClipboardSent = null;
         this._ardLastClipboardRecv = null;
         this._ardCursorCache = {};       // cursor image cache (id → {rgba, hotx, hoty, w, h})
@@ -165,6 +167,8 @@ export default class RFB extends EventTargetMixin {
         this._ardFirstDisplayInfo = true;  // first DisplayInfo2 needs double-tap
         this._ardPhase3Pending = false;    // waiting for echo DI2 before FBUpdateRequest
         this._ardLastClipboardReqTime = 0;
+        this._ardLastFbuTime = 0;          // ms timestamp of last completed FBU
+        this._ardTickleCount = 0;          // Tickles received since last FBU
         this._ardPrevCombinedW = 0;
         this._ardPrevCombinedH = 0;
         this._ardPrevDisplayCount = 0;
@@ -577,8 +581,23 @@ export default class RFB extends EventTargetMixin {
         this._canvas.blur();
     }
 
+    // Force-send clipboard text, bypassing both the dedup check and the
+    // auto-sync gate.  Used for explicit user-initiated sends so the content
+    // always reaches the remote even if auto-sync is disabled or the text
+    // equals what was last sent.
+    forceClipboardPaste(text) {
+        if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
+        this._ardLastClipboardSent = null;
+        if (this._rfbAppleARD) {
+            this._sendArdClipboard(text);
+            return;
+        }
+        this.clipboardPasteFrom(text);
+    }
+
     clipboardPasteFrom(text) {
         if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
+        if (this._rfbAppleARD && !this._ardClipboardSyncEnabled) { return; }
         if (text === this._ardLastClipboardSent) { return; }
         this._ardLastClipboardSent = text;
 
@@ -618,6 +637,31 @@ export default class RFB extends EventTargetMixin {
 
             RFB.messages.clientCutText(this._sock, data);
         }
+    }
+
+    // Enable or disable automatic clipboard sync (ARD AutoPasteboard).
+    // When enabled the server notifies us on remote clipboard changes and
+    // we forward local clipboard changes to the remote.
+    enableClipboardSync(enabled) {
+        if (this._rfbConnectionState !== 'connected' || !this._rfbAppleARD) {
+            Log.Warn("ARD: enableClipboardSync(" + enabled + ") skipped" +
+                     " state=" + this._rfbConnectionState +
+                     " ard=" + this._rfbAppleARD);
+            return;
+        }
+        Log.Info("ARD: clipboard sync " + (enabled ? "ON" : "OFF"));
+        this._sendArdAutoPasteboard(enabled ? 1 : 0);
+        this._sock.flush();
+    }
+
+    // Request the current contents of the remote clipboard (ARD pull).
+    // The server will respond with a clipboard event if data is available.
+    // Sets a one-shot flag so the reply is honoured even if auto-sync is off.
+    requestRemoteClipboard() {
+        if (this._rfbConnectionState !== 'connected' || !this._rfbAppleARD) return;
+        this._ardClipboardManualRequest = true;
+        RFB.messages.ardClipboardRequest(this._sock, this._ardClipboardSessionId);
+        this._sock.flush();
     }
 
     // Switch to a specific display or combined view.
@@ -1054,9 +1098,26 @@ export default class RFB extends EventTargetMixin {
 
             case 'connected':
                 this.dispatchEvent(new CustomEvent("connect", { detail: {} }));
+                if (this._rfbAppleARD) {
+                    this._ardLastFbuTime = 0;
+                    this._ardTickleCount = 0;
+                    this._ardFreezeWatchdog = setInterval(() => {
+                        if (!this._ardLastFbuTime) return; // still in init
+                        const age = Date.now() - this._ardLastFbuTime;
+                        if (age > 5000) {
+                            Log.Warn("ARD: no FBU for " + Math.round(age / 1000) +
+                                     "s (Tickles since last FBU: " +
+                                     this._ardTickleCount + ")");
+                        }
+                    }, 5000);
+                }
                 break;
 
             case 'disconnecting':
+                if (this._ardFreezeWatchdog) {
+                    clearInterval(this._ardFreezeWatchdog);
+                    this._ardFreezeWatchdog = null;
+                }
                 this._disconnect();
 
                 this._disconnTimer = setTimeout(() => {
@@ -2141,9 +2202,18 @@ export default class RFB extends EventTargetMixin {
                 if (responseData.length >= 2) {
                     const view = new DataView(responseData.buffer, responseData.byteOffset);
                     const status = view.getUint16(0, true);
-                    Log.Warn("RSATunnel: server response status: " + status);
-                    if (status === 81 || status === 255) {
-                        return this._fail("RSATunnel authentication denied");
+                    if (status !== 0) {
+                        Log.Warn("RSATunnel: server response status: " + status +
+                                 " — clearing cached RSA key");
+                        // Cached key may be stale (server changed or different host
+                        // behind the same gateway). Clear it so the next attempt
+                        // fetches a fresh key.
+                        this._clearCachedRSAKey();
+                        if (status === 81 || status === 255) {
+                            return this._fail("RSATunnel authentication denied");
+                        }
+                        return this._fail("RSATunnel authentication failed (status " +
+                                          status + ") — please retry");
                     }
                 }
             }
@@ -2274,6 +2344,15 @@ export default class RFB extends EventTargetMixin {
             }));
         } catch (e) {
             Log.Warn("Failed to cache RSA key: " + e);
+        }
+    }
+
+    _clearCachedRSAKey() {
+        if (!this._url) return;
+        try {
+            localStorage.removeItem('noVNC_rsaKey_' + this._url);
+        } catch (e) {
+            // ignore
         }
     }
 
@@ -3080,6 +3159,7 @@ export default class RFB extends EventTargetMixin {
 
     // ARD AutoPasteboard (0x15) — subscribe to clipboard notifications
     _sendArdAutoPasteboard(command) {
+        this._ardClipboardSyncEnabled = (command !== 0);
         this._sock.sQpush8(0x15);       // message type
         this._sock.sQpush8(0x00);       // padding
         this._sock.sQpush16(command);   // command (1=enable, 0=disable)
@@ -3221,6 +3301,10 @@ export default class RFB extends EventTargetMixin {
                 this._updateConnectionState('disconnecting');
                 break;
             case 2: {
+                if (!this._ardClipboardSyncEnabled) {
+                    Log.Debug("ARD StateChange: PasteboardChanged — sync disabled, ignoring");
+                    break;
+                }
                 const now = Date.now();
                 if (!this._ardLastClipboardReqTime ||
                     now - this._ardLastClipboardReqTime > 500) {
@@ -3234,14 +3318,32 @@ export default class RFB extends EventTargetMixin {
                 break;
             }
             case 3:
+                if (!this._ardClipboardSyncEnabled) {
+                    Log.Debug("ARD StateChange: PasteboardDataNeeded — sync disabled, ignoring");
+                    break;
+                }
                 Log.Debug("ARD StateChange: PasteboardDataNeeded — sending clipboard");
                 if (this._ardLastClipboardSent) {
                     this._sendArdClipboard(this._ardLastClipboardSent);
                 }
                 break;
-            case 4:
-                Log.Debug("ARD StateChange: Tickle");
+            case 4: {
+                this._ardTickleCount++;
+                const sinceLastFbu = this._ardLastFbuTime
+                    ? (Date.now() - this._ardLastFbuTime)
+                    : -1;
+                Log.Info("ARD StateChange: Tickle #" + this._ardTickleCount +
+                         " (last FBU " + (sinceLastFbu < 0 ? "never" :
+                         sinceLastFbu + "ms ago") + ")");
+                // The server stops pushing FBUs after ~3s of C→S silence and
+                // sends Tickles waiting for a response.  AutoFBUpdate tells it
+                // the client is alive and streaming should resume.  Respond on
+                // every Tickle so the server never has to send more than one.
+                this._sendArdAutoFBUpdate(1, 0, 0,
+                                          this._fbWidth, this._fbHeight);
+                this._sock.flush();
                 break;
+            }
             case 5:
                 Log.Info("ARD StateChange: DisplaySleep");
                 break;
@@ -3292,6 +3394,7 @@ export default class RFB extends EventTargetMixin {
                  " compressed=" + compressedSize);
 
         if (compressedSize === 0 || uncompressedSize === 0) {
+            this._sock.rQskipBytes(compressedSize); // consume payload even if empty
             return true;
         }
 
@@ -3323,6 +3426,12 @@ export default class RFB extends EventTargetMixin {
         }
         this._ardLastClipboardRecv = text;
 
+        const manual = this._ardClipboardManualRequest;
+        this._ardClipboardManualRequest = false;
+        if (!this._ardClipboardSyncEnabled && !manual) {
+            Log.Debug("ARD ClipboardSend: sync disabled, not writing to local clipboard");
+            return true;
+        }
         Log.Debug("ARD ClipboardSend: received " + text.length + " chars");
         this._writeClipboard(text);
 
@@ -3595,6 +3704,21 @@ export default class RFB extends EventTargetMixin {
         }
 
         this._display.flip();
+
+        // Track FBU timing for freeze detection
+        this._ardLastFbuTime = Date.now();
+        this._ardTickleCount = 0;
+
+        // After each frame, re-subscribe to AutoFBUpdate so the server keeps
+        // pushing.  This mirrors how the native ARD client calls
+        // RFBAutoFrameUpdate after every frame it receives in readFrameData:.
+        // Without this the server's subscription silently expires after a few
+        // seconds of C→S silence, causing the Tickle storm / freeze.
+        if (this._rfbAppleARD) {
+            this._sendArdAutoFBUpdate(1, 0, 0,
+                                      this._fbWidth, this._fbHeight);
+            this._sock.flush();
+        }
 
         // Activate stream encryption after the FBU that delivered the key
         if (this._ardPendingEncryption) {
@@ -4238,6 +4362,14 @@ export default class RFB extends EventTargetMixin {
             this._ardPhase3Pending = false;
             this._sendArdSetServerScaling(1.0);
             this._requestArdFullUpdate(scaledW, scaledH);
+        } else if (this._rfbConnectionState === 'connected') {
+            // No layout change but server sent DI2 anyway (e.g. session state
+            // change signalled by a flags transition).  Re-affirm AutoFBUpdate
+            // so the server knows the client is alive and streaming can continue.
+            Log.Info("ArdDisplayInfo2: state-only change (flags=0x" +
+                     displayFlags.toString(16) + "), re-subscribing AutoFBUpdate");
+            this._sendArdAutoFBUpdate(1, 0, 0, scaledW, scaledH);
+            this._sock.flush();
         }
 
         Log.Debug("ArdDisplayInfo2: " + scaledW + "x" + scaledH +

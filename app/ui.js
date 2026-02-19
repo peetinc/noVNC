@@ -121,6 +121,7 @@ const UI = {
         UI.addTouchSpecificHandlers();
         UI.addExtraKeysHandlers();
         UI.addDisplaySelectHandlers();
+        UI.addClipboardButtonHandlers();
         UI.addKeyboardShortcutHandlers();
         UI.addQualitySelectHandlers();
         UI.addMachineHandlers();
@@ -1005,7 +1006,13 @@ const UI = {
 
     clipboardReceive(e) {
         Log.Debug(">> UI.clipboardReceive: " + e.detail.text.substr(0, 40) + "...");
-        document.getElementById('noVNC_clipboard_text').value = e.detail.text;
+        const text = e.detail.text;
+        document.getElementById('noVNC_clipboard_text').value = text;
+        // Always push to the browser's native clipboard — whether triggered
+        // by auto-sync or a manual "get". The sync flag gates whether we
+        // request clipboard data at all (in rfb.js), not what we do with it
+        // once it arrives.
+        navigator.clipboard.writeText(text).catch(() => {});
         Log.Debug("<< UI.clipboardReceive");
     },
 
@@ -1174,6 +1181,7 @@ const UI = {
             UI.applyMacKeyLabels();
         }
 
+        UI.updateClipboardButtons(true);
         UI.updateBeforeUnload();
 
         // Do this last because it can only be used on rendered elements
@@ -1188,6 +1196,7 @@ const UI = {
         // the server, we need to do it here as well since
         // UI.disconnect() won't be used in those cases.
         UI.connected = false;
+        UI.updateClipboardButtons(false);
 
         UI.rfb = undefined;
         UI.wakeLockManager.release();
@@ -1346,6 +1355,10 @@ const UI = {
             document.mozFullScreenElement || // currently working methods
             document.webkitFullscreenElement ||
             document.msFullscreenElement) {
+            // Release keyboard lock before leaving fullscreen
+            if (navigator.keyboard && navigator.keyboard.unlock) {
+                navigator.keyboard.unlock();
+            }
             if (document.exitFullscreen) {
                 document.exitFullscreen();
             } else if (document.mozCancelFullScreen) {
@@ -1356,14 +1369,32 @@ const UI = {
                 document.msExitFullscreen();
             }
         } else {
+            // Keyboard Lock API requires the call to happen after fullscreen
+            // is granted, so chain it on the returned Promise.  Browsers that
+            // don't support the API (Firefox, Safari) silently no-op.
+            const lockKeys = () => {
+                if (navigator.keyboard && navigator.keyboard.lock) {
+                    navigator.keyboard.lock([
+                        'MetaLeft', 'MetaRight',
+                        'AltLeft', 'AltRight',
+                        'Escape',
+                        'F1', 'F2', 'F3', 'F4', 'F5', 'F6',
+                        'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
+                    ]).catch(() => {});
+                }
+            };
+            let fsPromise;
             if (document.documentElement.requestFullscreen) {
-                document.documentElement.requestFullscreen();
+                fsPromise = document.documentElement.requestFullscreen();
             } else if (document.documentElement.mozRequestFullScreen) {
                 document.documentElement.mozRequestFullScreen();
             } else if (document.documentElement.webkitRequestFullscreen) {
                 document.documentElement.webkitRequestFullscreen(Element.ALLOW_KEYBOARD_INPUT);
             } else if (document.body.msRequestFullscreen) {
                 document.body.msRequestFullscreen();
+            }
+            if (fsPromise) {
+                fsPromise.then(lockKeys).catch(() => {});
             }
         }
         UI.updateFullscreenButton();
@@ -1797,9 +1828,76 @@ const UI = {
             .addEventListener('click', UI.toggleDisplaySelect);
     },
 
+    addClipboardButtonHandlers() {
+        document.getElementById('noVNC_clipboard_send_button')
+            .addEventListener('click', async () => {
+                if (!UI.rfb) return;
+                let text;
+                try {
+                    text = await navigator.clipboard.readText();
+                } catch (e) {
+                    // Clipboard API unavailable or permission denied — fall back
+                    text = document.getElementById('noVNC_clipboard_text').value;
+                }
+                UI.rfb.forceClipboardPaste(text);
+            });
+        document.getElementById('noVNC_clipboard_get_button')
+            .addEventListener('click', () => {
+                if (UI.rfb) UI.rfb.requestRemoteClipboard();
+            });
+        document.getElementById('noVNC_clipboard_sync_button')
+            .addEventListener('click', UI.toggleClipboardSync);
+    },
+
+    _clipboardSyncEnabled: true,
+
+    toggleClipboardSync() {
+        UI._clipboardSyncEnabled = !UI._clipboardSyncEnabled;
+        const syncActive = UI._clipboardSyncEnabled;
+        Log.Info("Clipboard sync toggled: " + (syncActive ? "ON" : "OFF"));
+        const btn = document.getElementById('noVNC_clipboard_sync_button');
+        btn.classList.toggle('noVNC_selected', syncActive);
+        btn.title = syncActive ? 'Disable clipboard auto-sync' : 'Enable clipboard auto-sync';
+        // Send/get only usable when sync is off
+        document.getElementById('noVNC_clipboard_send_button').disabled = syncActive;
+        document.getElementById('noVNC_clipboard_get_button').disabled = syncActive;
+        if (UI.rfb) UI.rfb.enableClipboardSync(syncActive);
+    },
+
+    updateClipboardButtons(connected) {
+        const isARD = connected && UI.rfb && UI.rfb.isAppleARD;
+        const syncBtn   = document.getElementById('noVNC_clipboard_sync_button');
+        const sendBtn   = document.getElementById('noVNC_clipboard_send_button');
+        const getBtn    = document.getElementById('noVNC_clipboard_get_button');
+
+        // Only show the ARD clipboard buttons when connected to macOS;
+        // hide the legacy clipboard panel button when ARD takes over.
+        syncBtn.classList.toggle('noVNC_hidden', !isARD);
+        sendBtn.classList.toggle('noVNC_hidden', !isARD);
+        getBtn.classList.toggle('noVNC_hidden', !isARD);
+        document.getElementById('noVNC_clipboard_button')
+            .classList.toggle('noVNC_hidden', !!isARD);
+
+        syncBtn.disabled = !isARD;
+        if (isARD) {
+            // Sync is always ON at connect (init sends AutoPasteboard(1))
+            syncBtn.classList.toggle('noVNC_selected', UI._clipboardSyncEnabled);
+        }
+        const sendGetEnabled = isARD && !UI._clipboardSyncEnabled;
+        sendBtn.disabled = !sendGetEnabled;
+        getBtn.disabled = !sendGetEnabled;
+        if (!connected) {
+            UI._clipboardSyncEnabled = true;  // matches init default
+            syncBtn.classList.remove('noVNC_selected');
+        }
+    },
+
     // Double-tap backtick (` `) triggers a full framebuffer refresh.
     // First tap passes through normally; second tap within 300 ms is
     // intercepted (not forwarded to the remote) and fires requestFullUpdate.
+    _ardDisplaySwitchPending: false,
+    _ardDisplaySwitchTimer: null,
+
     _lastBacktickMs: 0,
 
     addKeyboardShortcutHandlers() {
@@ -1871,6 +1969,10 @@ const UI = {
         }
         btn.disabled = false;
 
+        // Clear any pending switch lock — server has responded
+        clearTimeout(UI._ardDisplaySwitchTimer);
+        UI._ardDisplaySwitchPending = false;
+
         // Rebuild button list: "All" first, then sorted by display ID
         container.innerHTML = '';
         const sorted = displays.slice().sort((a, b) => a.id - b.id);
@@ -1891,6 +1993,13 @@ const UI = {
             el.appendChild(icon);
             el.appendChild(text);
             el.addEventListener('click', () => {
+                if (UI._ardDisplaySwitchPending) return;
+                UI._ardDisplaySwitchPending = true;
+                // Fallback: unlock after 3s if server never responds
+                clearTimeout(UI._ardDisplaySwitchTimer);
+                UI._ardDisplaySwitchTimer = setTimeout(() => {
+                    UI._ardDisplaySwitchPending = false;
+                }, 3000);
                 UI.rfb.selectDisplay(combineAll, displayId);
                 // Mark active button
                 container.querySelectorAll('.noVNC_button')

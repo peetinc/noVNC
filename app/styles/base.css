@@ -690,6 +690,36 @@ html {
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
+/* ARD clipboard buttons */
+/* :root:not(.noVNC_connected) .noVNC_clipboard_btn {
+    display: none;
+} */
+.noVNC_clipboard_btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 4px;
+    color: rgba(255, 255, 255, 0.8);
+    line-height: 0;
+}
+.noVNC_clipboard_btn svg {
+    width: 24px;
+    height: 24px;
+    display: block;
+}
+.noVNC_clipboard_btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+/* Sync button dims when sync is off (clickable but visually inactive) */
+#noVNC_clipboard_sync_button:not(.noVNC_selected):not(:disabled) {
+    opacity: 0.4;
+}
+.noVNC_clipboard_btn:not(:disabled):hover {
+    color: #fff;
+    opacity: 1;
+}
+
 /* Shutdown/Reboot */
 :root:not(.noVNC_connected) #noVNC_power_button {
     display: none;
