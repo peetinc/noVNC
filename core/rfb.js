@@ -151,6 +151,8 @@ export default class RFB extends EventTargetMixin {
         this._ardQualityPreset = 'thousands';
         this._ardClipboardSessionId = 0;
         this._ardControlMode = 1;               // 0=Observe, 1=Control, 2=Exclusive
+        this._ardCurtainActive = false;         // whether curtain is currently engaged
+        this._ardCurtainMessage = '';           // default curtain message (empty = server default)
         this._ardClipboardSyncEnabled = true;  // mirrors init AutoPasteboard(1)
         this._ardClipboardManualRequest = false; // one-shot: honour reply even when sync off
         this._ardLastClipboardSent = null;
@@ -392,6 +394,42 @@ export default class RFB extends EventTargetMixin {
             this._sock.flush();
             Log.Info("ARD: control mode → " + ['Observe', 'Control', 'Exclusive'][mode]);
         }
+    }
+
+    // Whether the curtain (screen blank) is currently active on the remote Mac.
+    get ardCurtainActive() { return this._ardCurtainActive; }
+
+    // Default message shown on the curtained screen when ardCurtainLock() is
+    // called without an explicit message argument.  The ARD convention is:
+    //   "curtain\r\rScreen locked by <username>"
+    // where \r\r separates the title from the body.  An empty string causes
+    // the server to display its own default curtain screen.
+    get ardCurtainMessage() { return this._ardCurtainMessage; }
+    set ardCurtainMessage(msg) { this._ardCurtainMessage = String(msg); }
+
+    // Engage curtain mode: blanks the remote Mac's physical displays.
+    // message (optional): text to display on the curtained screen.  Falls
+    // back to ardCurtainMessage, then to an empty string (server default).
+    ardCurtainLock(message) {
+        if (this._rfbConnectionState !== 'connected' || !this._rfbAppleARD) return;
+        const text = (message !== undefined) ? String(message) : this._ardCurtainMessage;
+        this._ardCurtainActive = true;
+        this._sendArdSessionVisibility(false, text);
+        this._sock.flush();
+        Log.Info("ARD: curtain engaged" + (text ? ' ("' + text.substring(0, 40) + '")' : ''));
+        this.dispatchEvent(new CustomEvent('ardcurtainchange',
+            { detail: { active: true } }));
+    }
+
+    // Disengage curtain mode: restores the remote Mac's physical displays.
+    ardCurtainUnlock() {
+        if (this._rfbConnectionState !== 'connected' || !this._rfbAppleARD) return;
+        this._ardCurtainActive = false;
+        this._sendArdSessionVisibility(true, '');
+        this._sock.flush();
+        Log.Info("ARD: curtain disengaged");
+        this.dispatchEvent(new CustomEvent('ardcurtainchange',
+            { detail: { active: false } }));
     }
 
     get capabilities() { return this._capabilities; }
@@ -1140,8 +1178,9 @@ export default class RFB extends EventTargetMixin {
                     clearInterval(this._ardFreezeWatchdog);
                     this._ardFreezeWatchdog = null;
                 }
-                // Reset ARD mode state so reconnects start clean
+                // Reset ARD mode/curtain state so reconnects start clean
                 this._ardControlMode = 1;
+                this._ardCurtainActive = false;
                 this._disconnect();
 
                 this._disconnTimer = setTimeout(() => {
@@ -3237,6 +3276,24 @@ export default class RFB extends EventTargetMixin {
         Log.Debug("ARD: queued SetMode(" + mode + ")");
     }
 
+    // ARD SessionVisibility (0x0c) — 6 + msgLen bytes
+    // visible=true:  show screen (disengage curtain), msgLen=0, no text
+    // visible=false: curtain screen, display message text (UTF-8)
+    // Message convention: "curtain\r\rScreen locked by <user>"
+    _sendArdSessionVisibility(visible, message) {
+        const enc = new TextEncoder();
+        const msgBytes = visible ? new Uint8Array(0) : enc.encode(message);
+        const msgLen = msgBytes.length;
+        this._sock.sQpush8(0x0c);           // message type
+        this._sock.sQpush8(0);              // padding
+        this._sock.sQpush16(visible ? 1 : 0); // visibility: 0=curtain, 1=show
+        this._sock.sQpush16(msgLen);        // message length
+        for (let i = 0; i < msgLen; i++) {
+            this._sock.sQpush8(msgBytes[i]);
+        }
+        Log.Debug("ARD: queued SessionVisibility(" + (visible ? "show" : "curtain") + ")");
+    }
+
     // ARD SetDisplay (0x0d) — 8 bytes
     // Selects which display to share. CombineAll=1 shows all displays.
     _sendArdSetDisplay() {
@@ -3380,7 +3437,10 @@ export default class RFB extends EventTargetMixin {
                 this._updateCursor(new Uint8Array(4), 0, 0, 1, 1);
                 break;
             case 12:
-                Log.Info("ARD StateChange: CursorVisible");
+                // CursorVisible fires as the server's acknowledgment of both
+                // curtain engage and disengage via SessionVisibility (0x0c).
+                Log.Info("ARD StateChange: CursorVisible" +
+                         (this._ardCurtainActive ? " (curtain engaged)" : ""));
                 this._reapplyArdCursor();
                 break;
             default:

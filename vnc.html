@@ -217,6 +217,26 @@
                 </svg>
             </button>
 
+            <!-- ARD curtain / screen lock -->
+            <button id="noVNC_curtain_button" class="noVNC_button noVNC_clipboard_btn noVNC_hidden"
+                    disabled title="Lock remote screen">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>
+                </svg>
+            </button>
+            <div class="noVNC_vcenter">
+            <div id="noVNC_curtain_panel" class="noVNC_panel">
+                <div class="noVNC_heading">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:middle;margin-right:0.3em"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Lock Remote Screen
+                </div>
+                <p class="noVNC_subheading">Message shown on the remote screen:</p>
+                <input type="text" id="noVNC_curtain_message"
+                       placeholder="Screen locked by administrator."
+                       style="width:100%;box-sizing:border-box;">
+                <input type="button" id="noVNC_curtain_lock_button" value="Lock Screen">
+            </div>
+            </div>
+
             <!-- Shutdown/Reboot -->
             <input type="image" alt="Shutdown/Reboot" src="app/images/power.svg"
                 id="noVNC_power_button" class="noVNC_button"

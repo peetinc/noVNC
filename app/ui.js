@@ -122,6 +122,7 @@ const UI = {
         UI.addExtraKeysHandlers();
         UI.addDisplaySelectHandlers();
         UI.addClipboardButtonHandlers();
+        UI.addCurtainHandlers();
         UI.addKeyboardShortcutHandlers();
         UI.addQualitySelectHandlers();
         UI.addMachineHandlers();
@@ -885,6 +886,7 @@ const UI = {
         UI.closeSettingsPanel();
         UI.closePowerPanel();
         UI.closeClipboardPanel();
+        UI.closeCurtainPanel();
         UI.closeExtraKeys();
         UI.closeDisplaySelect();
         UI.closeQualitySelect();
@@ -1125,6 +1127,7 @@ const UI = {
         UI.rfb.addEventListener("clippingviewport", UI.updateViewDrag);
         UI.rfb.addEventListener("capabilities", UI.updatePowerButton);
         UI.rfb.addEventListener("clipboard", UI.clipboardReceive);
+        UI.rfb.addEventListener("ardcurtainchange", UI.curtainStateChanged);
         UI.rfb.addEventListener("bell", UI.bell);
         UI.rfb.addEventListener("desktopname", UI.updateDesktopName);
         UI.rfb.clipViewport = UI.getSetting('view_clip');
@@ -1194,6 +1197,7 @@ const UI = {
 
         UI.updateClipboardButtons(true);
         UI.updateArdControlSettings(!!(UI.rfb && UI.rfb.isAppleARD));
+        UI.updateCurtainButton(!!(UI.rfb && UI.rfb.isAppleARD));
         UI.updateBeforeUnload();
 
         // Do this last because it can only be used on rendered elements
@@ -1210,6 +1214,7 @@ const UI = {
         UI.connected = false;
         UI.updateClipboardButtons(false);
         UI.updateArdControlSettings(false);
+        UI.updateCurtainButton(false);
 
         UI.rfb = undefined;
         UI.wakeLockManager.release();
@@ -1863,6 +1868,87 @@ const UI = {
     },
 
     _clipboardSyncEnabled: true,
+    _ardCurtainMessage: '',  // empty = use placeholder default on send
+
+    addCurtainHandlers() {
+        document.getElementById('noVNC_curtain_button')
+            .addEventListener('click', () => {
+                if (!UI.rfb) return;
+                if (UI.rfb.ardCurtainActive) {
+                    // Currently locked — unlock immediately, no panel needed
+                    UI.rfb.ardCurtainUnlock();
+                } else {
+                    // About to lock — open panel for message confirmation
+                    UI.toggleCurtainPanel();
+                }
+            });
+        document.getElementById('noVNC_curtain_lock_button')
+            .addEventListener('click', UI.engageCurtain);
+        document.getElementById('noVNC_curtain_message')
+            .addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); UI.engageCurtain(); }
+                if (e.key === 'Escape') { UI.closeCurtainPanel(); }
+            });
+    },
+
+    openCurtainPanel() {
+        UI.closeAllPanels();
+        UI.openControlbar();
+        const input = document.getElementById('noVNC_curtain_message');
+        // Show stored custom message as editable value; if none yet, leave
+        // empty so the placeholder (default message in gray) is visible.
+        input.value = UI._ardCurtainMessage;
+        document.getElementById('noVNC_curtain_panel').classList.add('noVNC_open');
+        document.getElementById('noVNC_curtain_button').classList.add('noVNC_selected');
+    },
+
+    closeCurtainPanel() {
+        document.getElementById('noVNC_curtain_panel').classList.remove('noVNC_open');
+        document.getElementById('noVNC_curtain_button').classList.remove('noVNC_selected');
+    },
+
+    toggleCurtainPanel() {
+        if (document.getElementById('noVNC_curtain_panel')
+                .classList.contains('noVNC_open')) {
+            UI.closeCurtainPanel();
+        } else {
+            UI.openCurtainPanel();
+        }
+    },
+
+    engageCurtain() {
+        if (!UI.rfb) return;
+        const input = document.getElementById('noVNC_curtain_message');
+        const typed = input.value.trim();
+        // If user typed something, store it for next time; otherwise keep
+        // whatever was stored (or fall back to the placeholder default).
+        if (typed) UI._ardCurtainMessage = typed;
+        const msg = UI._ardCurtainMessage ||
+                    input.placeholder; // placeholder = built-in default
+        UI.closeCurtainPanel();
+        UI.rfb.ardCurtainLock(msg);
+    },
+
+    curtainStateChanged(e) {
+        UI.updateCurtainButton(!!(UI.rfb && UI.rfb.isAppleARD));
+    },
+
+    updateCurtainButton(isARD) {
+        const btn = document.getElementById('noVNC_curtain_button');
+        btn.classList.toggle('noVNC_hidden', !isARD);
+        btn.disabled = !isARD;
+        if (!isARD) {
+            UI.closeCurtainPanel();
+            return;
+        }
+        const active = UI.rfb && UI.rfb.ardCurtainActive;
+        // Swap icon: lock-open when inactive, lock when active
+        const svgOpen = '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>';
+        const svgLock = '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>';
+        btn.querySelector('svg').innerHTML = active ? svgLock : svgOpen;
+        btn.classList.toggle('noVNC_selected', !!active);
+        btn.title = active ? 'Unlock remote screen' : 'Lock remote screen';
+    },
 
     toggleClipboardSync() {
         UI._clipboardSyncEnabled = !UI._clipboardSyncEnabled;
@@ -1924,8 +2010,12 @@ const UI = {
             .classList.toggle('noVNC_hidden', inputHidden);
         document.getElementById('noVNC_toggle_extra_keys_button')
             .classList.toggle('noVNC_hidden', inputHidden);
-        document.getElementById('noVNC_clipboard_button')
-            .classList.toggle('noVNC_hidden', inputHidden);
+        // Legacy clipboard button is always hidden on ARD (ARD has its own
+        // clipboard buttons); only toggle it for non-ARD view-only changes.
+        if (!UI.rfb || !UI.rfb.isAppleARD) {
+            document.getElementById('noVNC_clipboard_button')
+                .classList.toggle('noVNC_hidden', inputHidden);
+        }
     },
 
     // Show or hide ARD-specific control mode settings and set the initial
