@@ -178,6 +178,7 @@ export default class RFB extends EventTargetMixin {
         this._ardPrevCombinedW = 0;
         this._ardPrevCombinedH = 0;
         this._ardPrevDisplayCount = 0;
+        this._ardServerFlags = 0;              // Extended ServerInit session flags
         this._ardSessionSelectNeeded = false;  // Session Select required before FBUs
         this._ardSessionSelectConsoleUser = ''; // User currently at console
         this._rfbVeNCryptState = 0;
@@ -2772,6 +2773,7 @@ export default class RFB extends EventTargetMixin {
                                   (name.charCodeAt(3) << 16) |
                                   (name.charCodeAt(4) << 8)  |
                                    name.charCodeAt(5)) >>> 0;
+            this._ardServerFlags = serverFlags;  // Save for session select check
             const accessRights = ((name.charCodeAt(6) << 24) |
                                    (name.charCodeAt(7) << 16) |
                                    (name.charCodeAt(8) << 8)  |
@@ -2863,7 +2865,7 @@ export default class RFB extends EventTargetMixin {
 
         if (this._rfbAppleARD) {
             // Check if Session Select is needed
-            const sessionSelectNeeded = (serverFlags & 0x04) !== 0;
+            const sessionSelectNeeded = (this._ardServerFlags & 0x04) !== 0;
             this._ardSessionSelectNeeded = sessionSelectNeeded;
 
             if (sessionSelectNeeded) {
