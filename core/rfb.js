@@ -178,6 +178,8 @@ export default class RFB extends EventTargetMixin {
         this._ardPrevCombinedW = 0;
         this._ardPrevCombinedH = 0;
         this._ardPrevDisplayCount = 0;
+        this._ardSessionSelectNeeded = false;  // Session Select required before FBUs
+        this._ardSessionSelectConsoleUser = ''; // User currently at console
         this._rfbVeNCryptState = 0;
         this._rfbXvpVer = 0;
 
@@ -2860,6 +2862,19 @@ export default class RFB extends EventTargetMixin {
         }
 
         if (this._rfbAppleARD) {
+            // Check if Session Select is needed
+            const sessionSelectNeeded = (serverFlags & 0x04) !== 0;
+            this._ardSessionSelectNeeded = sessionSelectNeeded;
+
+            if (sessionSelectNeeded) {
+                Log.Info("ARD init: Session Select required (fb=" +
+                         this._fbWidth + "x" + this._fbHeight + " name=" + this._fbName + ")");
+                // Session Select protocol runs before normal ARD init
+                // Will transition to ARD init after session is granted
+                this._rfbInitState = 'SessionSelectInfo';
+                return true;
+            }
+
             Log.Info("ARD init: fb=" + this._fbWidth + "x" + this._fbHeight +
                      " name=" + this._fbName);
             // ARD init sequence (Phase 5 + 6):
@@ -2990,6 +3005,155 @@ export default class RFB extends EventTargetMixin {
         RFB.messages.clientEncodings(this._sock, encs);
     }
 
+    _handleSessionInfo() {
+        // Session Select: SessionInfo (S→C)
+        // [u16be bodySize][u16be version=0x0100][u32be allowedCommands][u32 reserved][null-terminated username]
+        if (this._sock.rQwait("SessionInfo header", 2)) { return false; }
+
+        const bodySize = this._sock.rQpeek16();
+        if (this._sock.rQwait("SessionInfo body", bodySize, 2)) { return false; }
+
+        this._sock.rQskipBytes(2); // bodySize
+        const version = this._sock.rQshift16();
+        const allowedCommands = this._sock.rQshift32();
+        this._sock.rQskipBytes(4); // reserved
+
+        // Read null-terminated console username
+        const remainingBytes = bodySize - 10; // 2 (version) + 4 (allowedCommands) + 4 (reserved)
+        const usernameBytes = this._sock.rQshiftBytes(remainingBytes);
+        let username = '';
+        for (let i = 0; i < usernameBytes.length; i++) {
+            if (usernameBytes[i] === 0) break;
+            username += String.fromCharCode(usernameBytes[i]);
+        }
+        this._ardSessionSelectConsoleUser = username;
+
+        Log.Info("ARD SessionInfo: version=0x" + version.toString(16).padStart(4, '0') +
+                 " allowedCommands=0x" + allowedCommands.toString(16).padStart(8, '0') +
+                 " consoleUser=" + (username || "(none)"));
+
+        // Send SessionCommand: ConnectToConsole (command=1)
+        // Default to always connect to console (physical display)
+        this._sendSessionCommand(1); // 1 = ConnectToConsole
+
+        this._rfbInitState = 'SessionSelectResult';
+        return true;
+    }
+
+    _sendSessionCommand(command) {
+        // SessionCommand v1: [u16be bodySize=72][u16be version=1][pad4][u8 cmd][pad][char[64] username]
+        const bodySize = 72;
+        const version = 1;
+        const username = this._ardSessionSelectConsoleUser || '';
+
+        this._sock.sQpush16(bodySize);
+        this._sock.sQpush16(version);
+        this._sock.sQpush32(0); // padding
+        this._sock.sQpush8(command);
+        this._sock.sQpush8(0); // padding
+
+        // Username field: 64 bytes, null-padded
+        for (let i = 0; i < 64; i++) {
+            this._sock.sQpush8(i < username.length ? username.charCodeAt(i) : 0);
+        }
+
+        this._sock.flush();
+
+        const commandName = (command === 0) ? 'RequestConsole' :
+                            (command === 1) ? 'ConnectToConsole' :
+                            (command === 2) ? 'ConnectToVirtualDisplay' : 'Unknown';
+        Log.Info("ARD SessionCommand: " + commandName + " (cmd=" + command +
+                 " user=" + (username || "(none)") + ")");
+    }
+
+    _handleSessionResult() {
+        // SessionResult: [u16be bodySize=80][u16be version=1][u32be status][74 bytes reserved]
+        if (this._sock.rQwait("SessionResult header", 2)) { return false; }
+
+        const bodySize = this._sock.rQpeek16();
+        if (this._sock.rQwait("SessionResult body", bodySize, 2)) { return false; }
+
+        this._sock.rQskipBytes(2); // bodySize
+        const version = this._sock.rQshift16();
+        const status = this._sock.rQshift32();
+        this._sock.rQskipBytes(bodySize - 6); // skip remaining reserved bytes
+
+        const statusName = (status === 0) ? 'Granted' :
+                           (status === 2) ? 'Pending' :
+                           (status === 3) ? 'Pending' :
+                           (status === 4) ? 'Granted' : 'Unknown';
+        Log.Info("ARD SessionResult: status=" + status + " (" + statusName + ")");
+
+        if (status === 2 || status === 3) {
+            // Pending - wait for another SessionResult
+            Log.Info("ARD SessionResult: waiting for next result...");
+            // Stay in same state to read next SessionResult
+            return true;
+        }
+
+        if (status === 0 || status === 4) {
+            // Granted - proceed with ARD init
+            Log.Info("ARD SessionResult: session granted, starting ARD init");
+            this._ardSessionSelectNeeded = false;
+
+            // Now proceed with normal ARD init sequence
+            Log.Info("ARD init: fb=" + this._fbWidth + "x" + this._fbHeight +
+                     " name=" + this._fbName);
+            Log.Info("ARD init [1/10] ViewerInfo");
+            this._sendArdViewerInfo();
+            Log.Info("ARD init [2/10] SetMode(Control)");
+            this._ardControlMode = 1;
+            this._sendArdSetMode(1);
+            Log.Info("ARD init [3/10] SetDisplay(combineAll=1, All)");
+            this._sendArdSetDisplay();
+            Log.Info("ARD init [4/10] AutoPasteboard(1)");
+            this._sendArdAutoPasteboard(1);
+            Log.Info("ARD init [5/10] SetEncodings(preset=" + this._ardQualityPreset + ")");
+            this._sendEncodings();
+            Log.Info("ARD init [6/10] PixelFormat(32bpp depth=" + this._fbDepth + ")");
+            RFB.messages.pixelFormat(this._sock, this._fbDepth, true, 16, 8, 0);
+            Log.Info("ARD init [7/10] SetEncodings(repeat)");
+            this._sendEncodings();
+
+            if (this._ardDHKey) {
+                Log.Info("ARD init [8/10] SetEncryption(request)");
+                RFB.messages.ardSetEncryption(this._sock, 1);
+            } else {
+                Log.Info("ARD init [8/10] SetEncryption skipped (no DH key)");
+            }
+
+            Log.Info("ARD init [9/11] FBUpdateRequest(full)");
+            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                         this._fbWidth, this._fbHeight);
+            Log.Info("ARD init [10/11] AutoFBUpdate(enable)");
+            this._sendArdAutoFBUpdate(1, 0, 0,
+                                      this._fbWidth, this._fbHeight);
+            this._sock.flush();
+            setTimeout(() => {
+                if (this._rfbConnectionState !== 'connected') return;
+                Log.Info("ARD init [11/11] FBUpdateRequest+AutoFBUpdate(delayed 50ms)");
+                RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                             this._fbWidth, this._fbHeight);
+                this._sendArdAutoFBUpdate(1, 0, 0,
+                                          this._fbWidth, this._fbHeight);
+                this._sock.flush();
+            }, 50);
+
+            // Set default arrow cursor and track first-FBU cursor delivery
+            this._ardActiveCursor = { type: 'system', id: 0 };
+            this._setArdSystemCursor(0);
+            this._ardGotCursor = false;
+            this._ardFirstDisplayInfo = true;
+            this._ardPhase3Pending = false;
+
+            this._updateConnectionState('connected');
+            return true;
+        }
+
+        // Any other status is an error
+        return this._fail("Session Select failed: status=" + status);
+    }
+
     /* RFB protocol initialization states:
      *   ProtocolVersion
      *   Security
@@ -3031,6 +3195,12 @@ export default class RFB extends EventTargetMixin {
 
             case 'ServerInitialisation':
                 return this._negotiateServerInit();
+
+            case 'SessionSelectInfo':
+                return this._handleSessionInfo();
+
+            case 'SessionSelectResult':
+                return this._handleSessionResult();
 
             default:
                 return this._fail("Unknown init state (state: " +
@@ -4134,8 +4304,30 @@ export default class RFB extends EventTargetMixin {
 
         if (imageSize > 0) {
             if (this._sock.rQwait("ArdUserInfo avatar", imageSize)) { return false; }
-            const pngBytes = this._sock.rQshiftBytes(imageSize);
-            this._ardUserAvatarPng = pngBytes;  // BGRA PNG, cached for future use
+            const compressedBytes = this._sock.rQshiftBytes(imageSize);
+
+            // ARD sends zlib-compressed PNG (encoding=6), not raw PNG
+            // Decompressed size unknown — try inflating with a large buffer
+            const inflator = new Inflator();
+            inflator.setInput(compressedBytes);
+            let pngBytes;
+            try {
+                // Try progressively larger buffers until inflate succeeds
+                for (let size of [4096, 8192, 16384, 32768]) {
+                    try {
+                        pngBytes = inflator.inflate(size);
+                        break; // Success
+                    } catch (e) {
+                        if (e.message !== "Incomplete zlib block") throw e;
+                        inflator.reset();
+                        inflator.setInput(compressedBytes);
+                    }
+                }
+            } finally {
+                inflator.setInput(null);
+            }
+
+            this._ardUserAvatarPng = pngBytes;  // Raw BGRA pixel data, cached for future use
         } else {
             this._ardUserAvatarPng = null;
         }
@@ -4146,10 +4338,9 @@ export default class RFB extends EventTargetMixin {
         Log.Info("ARD UserInfo: username=" + (username || "(none — login window)") +
                  " avatarSize=" + (imageSize > 0 ? imageSize + "b enc=" + imageEncoding : "none"));
 
-        if (username !== prevUsername) {
-            this.dispatchEvent(new CustomEvent('arduserinfo',
-                { detail: { username: username, hasAvatar: imageSize > 0 } }));
-        }
+        // Always dispatch event so avatar updates even if username unchanged
+        this.dispatchEvent(new CustomEvent('arduserinfo',
+            { detail: { username: username, hasAvatar: imageSize > 0 } }));
 
         return true;
     }

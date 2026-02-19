@@ -1218,6 +1218,12 @@ const UI = {
         UI.updateArdControlSettings(false);
         UI.updateCurtainButton(false);
 
+        // Hide ARD user avatar
+        const avatarDiv = document.getElementById('noVNC_ard_user_avatar');
+        if (avatarDiv) {
+            avatarDiv.style.display = 'none';
+        }
+
         UI.rfb = undefined;
         UI.wakeLockManager.release();
 
@@ -1937,6 +1943,48 @@ const UI = {
 
     ardUserInfoChanged(e) {
         UI.updateCurtainButton(!!(UI.rfb && UI.rfb.isAppleARD));
+
+        // Update user avatar in sidebar
+        const avatarDiv = document.getElementById('noVNC_ard_user_avatar');
+        const avatarImg = document.getElementById('noVNC_ard_user_avatar_img');
+        if (UI.rfb && UI.rfb._ardUserAvatarPng) {
+            // ARD sends raw BGRA pixel data (not PNG despite encoding=6)
+            // Typical 32x32 = 4096 bytes
+            const data = UI.rfb._ardUserAvatarPng;
+            const size = Math.sqrt(data.length / 4); // width = height for square avatar
+
+            if (size % 1 === 0) { // Valid square dimensions
+                const canvas = document.createElement('canvas');
+                canvas.width = size;
+                canvas.height = size;
+                const ctx = canvas.getContext('2d', { alpha: true });
+
+                // Clear canvas to fully transparent
+                ctx.clearRect(0, 0, size, size);
+
+                const imageData = ctx.createImageData(size, size);
+
+                // Copy BGRA → RGBA (swap R and B channels)
+                for (let i = 0; i < data.length; i += 4) {
+                    imageData.data[i]     = data[i + 2]; // R from B
+                    imageData.data[i + 1] = data[i + 1]; // G
+                    imageData.data[i + 2] = data[i];     // B from R
+                    imageData.data[i + 3] = data[i + 3]; // A
+                }
+
+                ctx.putImageData(imageData, 0, 0);
+                avatarImg.src = canvas.toDataURL('image/png');
+                avatarDiv.style.display = 'block';
+                avatarDiv.title = (UI.rfb.ardUsername || 'User') + ' is signed in';
+            } else {
+                console.error("ARD avatar: invalid dimensions, data length=" + data.length);
+                avatarDiv.style.display = 'none';
+            }
+        } else {
+            avatarDiv.style.display = 'none';
+            avatarImg.src = '';
+            avatarDiv.title = '';
+        }
     },
 
     ardConsoleStateChanged(e) {
