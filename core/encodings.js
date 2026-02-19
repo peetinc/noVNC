@@ -25,6 +25,7 @@ export const encodings = {
 
     pseudoEncodingArdCursorPos: 1100,
     pseudoEncodingArdDisplayInfo: 1101,
+    pseudoEncodingArdUserInfo: 1102,
     pseudoEncodingArdSessionEncryption: 1103,
     pseudoEncodingArdCursorAlpha: 1104,
     pseudoEncodingArdDisplayInfo2: 1105,

@@ -1128,6 +1128,8 @@ const UI = {
         UI.rfb.addEventListener("capabilities", UI.updatePowerButton);
         UI.rfb.addEventListener("clipboard", UI.clipboardReceive);
         UI.rfb.addEventListener("ardcurtainchange", UI.curtainStateChanged);
+        UI.rfb.addEventListener("arduserinfo", UI.ardUserInfoChanged);
+        UI.rfb.addEventListener("ardconsolestate", UI.ardConsoleStateChanged);
         UI.rfb.addEventListener("bell", UI.bell);
         UI.rfb.addEventListener("desktopname", UI.updateDesktopName);
         UI.rfb.clipViewport = UI.getSetting('view_clip');
@@ -1933,21 +1935,41 @@ const UI = {
         UI.updateCurtainButton(!!(UI.rfb && UI.rfb.isAppleARD));
     },
 
+    ardUserInfoChanged(e) {
+        UI.updateCurtainButton(!!(UI.rfb && UI.rfb.isAppleARD));
+    },
+
+    ardConsoleStateChanged(e) {
+        UI.updateCurtainButton(!!(UI.rfb && UI.rfb.isAppleARD));
+    },
+
     updateCurtainButton(isARD) {
         const btn = document.getElementById('noVNC_curtain_button');
         btn.classList.toggle('noVNC_hidden', !isARD);
-        btn.disabled = !isARD;
         if (!isARD) {
+            btn.disabled = true;
             UI.closeCurtainPanel();
             return;
         }
         const active = UI.rfb && UI.rfb.ardCurtainActive;
+        const consoleActive = UI.rfb && UI.rfb.ardConsoleActive;
+
+        // Disable curtain when remote is at lock/login screen — server will reject it
+        btn.disabled = !consoleActive;
+
         // Swap icon: lock-open when inactive, lock when active
         const svgOpen = '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>';
         const svgLock = '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>';
         btn.querySelector('svg').innerHTML = active ? svgLock : svgOpen;
         btn.classList.toggle('noVNC_selected', !!active);
-        btn.title = active ? 'Unlock remote screen' : 'Lock remote screen';
+
+        if (!consoleActive) {
+            btn.title = 'Screen lock unavailable — remote Mac is at the login or lock screen';
+        } else if (active) {
+            btn.title = 'Unlock remote screen';
+        } else {
+            btn.title = 'Lock remote screen';
+        }
     },
 
     toggleClipboardSync() {

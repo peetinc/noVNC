@@ -153,6 +153,9 @@ export default class RFB extends EventTargetMixin {
         this._ardControlMode = 1;               // 0=Observe, 1=Control, 2=Exclusive
         this._ardCurtainActive = false;         // whether curtain is currently engaged
         this._ardCurtainMessage = '';           // default curtain message (empty = server default)
+        this._ardConsoleActive = false;         // true = user at active session; false = lock/login screen
+        this._ardUsername = '';                 // logged-in username, empty = login window
+        this._ardUserAvatarPng = null;          // cached avatar PNG (BGRA, may be null)
         this._ardClipboardSyncEnabled = true;  // mirrors init AutoPasteboard(1)
         this._ardClipboardManualRequest = false; // one-shot: honour reply even when sync off
         this._ardLastClipboardSent = null;
@@ -407,14 +410,26 @@ export default class RFB extends EventTargetMixin {
     get ardCurtainMessage() { return this._ardCurtainMessage; }
     set ardCurtainMessage(msg) { this._ardCurtainMessage = String(msg); }
 
+    // Username of the currently logged-in user on the remote Mac.
+    // Empty string means the login window is shown (no user at console).
+    get ardUsername() { return this._ardUsername; }
+
+    // True when a user is actively at the console (desktop unlocked).
+    // False when the remote Mac is at the login window or lock screen.
+    // Derived from DI2 global flags bit 3 (0x08): set = locked/login window.
+    get ardConsoleActive() { return this._ardConsoleActive; }
+
     // Engage curtain mode: blanks the remote Mac's physical displays.
     // message (optional): text to display on the curtained screen.  Falls
     // back to ardCurtainMessage, then to an empty string (server default).
     ardCurtainLock(message) {
         if (this._rfbConnectionState !== 'connected' || !this._rfbAppleARD) return;
         const text = (message !== undefined) ? String(message) : this._ardCurtainMessage;
+        // Protocol requires "curtain\r\r" prefix before the display message.
+        // An empty message sends no text (server shows its default curtain screen).
+        const payload = text ? ('curtain\r\r' + text) : '';
         this._ardCurtainActive = true;
-        this._sendArdSessionVisibility(false, text);
+        this._sendArdSessionVisibility(false, payload);
         this._sock.flush();
         Log.Info("ARD: curtain engaged" + (text ? ' ("' + text.substring(0, 40) + '")' : ''));
         this.dispatchEvent(new CustomEvent('ardcurtainchange',
@@ -1178,9 +1193,12 @@ export default class RFB extends EventTargetMixin {
                     clearInterval(this._ardFreezeWatchdog);
                     this._ardFreezeWatchdog = null;
                 }
-                // Reset ARD mode/curtain state so reconnects start clean
+                // Reset ARD mode/curtain/user state so reconnects start clean
                 this._ardControlMode = 1;
                 this._ardCurtainActive = false;
+                this._ardConsoleActive = false;
+                this._ardUsername = '';
+                this._ardUserAvatarPng = null;
                 this._disconnect();
 
                 this._disconnTimer = setTimeout(() => {
@@ -1765,11 +1783,13 @@ export default class RFB extends EventTargetMixin {
             case "003.889":  // Apple Remote Desktop
                 this._rfbVersion = 3.8;
                 this._rfbAppleARD = true;
-                this._decoders[encodings.encodingZlib].swapRedBlue = true;
-                this._decoders[encodings.encodingRaw].swapRedBlue = true;
-                this._decoders[encodings.encodingZRLE].swapRedBlue = true;
-                this._decoders[encodings.encodingHextile].swapRedBlue = true;
-                this._decoders[encodings.encodingRRE].swapRedBlue = true;
+                // ARD server ignores client PixelFormat and always sends RGB (not BGR)
+                // despite ServerInit advertising BGR. Don't swap.
+                this._decoders[encodings.encodingZlib].swapRedBlue = false;
+                this._decoders[encodings.encodingRaw].swapRedBlue = false;
+                this._decoders[encodings.encodingZRLE].swapRedBlue = false;
+                this._decoders[encodings.encodingHextile].swapRedBlue = false;
+                this._decoders[encodings.encodingRRE].swapRedBlue = false;
                 break;
             case "003.008":
             case "004.000":  // Intel AMT KVM
@@ -2733,6 +2753,54 @@ export default class RFB extends EventTargetMixin {
         // ARD ServerInit name has a 22-byte binary prefix (flags + capabilities).
         // Strip it before UTF-8 decoding.
         if (this._rfbAppleARD && nameLength >= 22 && name.charCodeAt(0) === 0x00) {
+            // Parse and log all server-advertised fields before discarding the prefix.
+            //
+            // Session flags (bytes 2-5, u32be):
+            //   bit 0 = observePermitted, bit 1 = mayControlPermitted,
+            //   bit 2 = sessionSelectNeeded, bit 3 = dontConnectToVirtualDisplay
+            //
+            // Capability bitmap (bytes 6-21, 16 bytes):
+            //   bytes 6-9 = 32-bit access rights bitmask (Section 16.1):
+            //     bit 0=Chat, 1=Observe, 2=SendFiles, 3=DeleteFiles,
+            //     4=GenerateReports, 5=OpenQuitApps, 6=ChangeSettings,
+            //     7=PowerManagement, 8=Control(inverted),
+            //     30=ShowObserverNotification, 31=Encrypted
+            //   bytes 10-21 = remaining capability bits (unknown assignments)
+            const serverFlags = ((name.charCodeAt(2) << 24) |
+                                  (name.charCodeAt(3) << 16) |
+                                  (name.charCodeAt(4) << 8)  |
+                                   name.charCodeAt(5)) >>> 0;
+            const accessRights = ((name.charCodeAt(6) << 24) |
+                                   (name.charCodeAt(7) << 16) |
+                                   (name.charCodeAt(8) << 8)  |
+                                    name.charCodeAt(9)) >>> 0;
+            let capHex = '';
+            for (let i = 6; i < 22; i++) {
+                capHex += name.charCodeAt(i).toString(16).padStart(2, '0');
+                if (i < 21) capHex += ' ';
+            }
+            const canControl = (accessRights & 0x02) !== 0 && (accessRights & 0x100) === 0;
+            Log.Info("ARD ServerInit: sessionFlags=0x" +
+                     serverFlags.toString(16).padStart(8, '0') +
+                     " (observeOK=" + ((serverFlags & 0x01) !== 0) +
+                     " controlOK=" + ((serverFlags & 0x02) !== 0) +
+                     " sessionSelect=" + ((serverFlags & 0x04) !== 0) +
+                     " noVirtualDisplay=" + ((serverFlags & 0x08) !== 0) + ")" +
+                     "\nARD ServerInit: accessRights=0x" +
+                     accessRights.toString(16).padStart(8, '0') +
+                     " canControl=" + canControl +
+                     " (chat=" + ((accessRights & 0x01) !== 0) +
+                     " observe=" + ((accessRights & 0x02) !== 0) +
+                     " sendFiles=" + ((accessRights & 0x04) !== 0) +
+                     " deleteFiles=" + ((accessRights & 0x08) !== 0) +
+                     " reports=" + ((accessRights & 0x10) !== 0) +
+                     " openApps=" + ((accessRights & 0x20) !== 0) +
+                     " changeSettings=" + ((accessRights & 0x40) !== 0) +
+                     " power=" + ((accessRights & 0x80) !== 0) +
+                     " controlBlocked=" + ((accessRights & 0x100) !== 0) +
+                     " showObserver=" + ((accessRights & 0x40000000) !== 0) +
+                     " encrypted=" + ((accessRights & 0x80000000) !== 0) + ")" +
+                     "\nARD ServerInit: capabilityBitmap=[" + capHex + "]");
             name = name.substring(name.lastIndexOf('\x00') + 1);
         }
 
@@ -2874,6 +2942,7 @@ export default class RFB extends EventTargetMixin {
             encs.push(encodings.pseudoEncodingArdDisplayInfo);
             encs.push(encodings.pseudoEncodingArdDisplayInfo2);
             encs.push(encodings.pseudoEncodingArdSessionEncryption);
+            encs.push(encodings.pseudoEncodingArdUserInfo);
             RFB.messages.clientEncodings(this._sock, encs);
             return;
         }
@@ -3291,7 +3360,10 @@ export default class RFB extends EventTargetMixin {
         for (let i = 0; i < msgLen; i++) {
             this._sock.sQpush8(msgBytes[i]);
         }
-        Log.Debug("ARD: queued SessionVisibility(" + (visible ? "show" : "curtain") + ")");
+        Log.Info("ARD: SessionVisibility → " + (visible ? "show" : "curtain") +
+                 " visibility=" + (visible ? 1 : 0) +
+                 " msgLen=" + msgLen +
+                 (msgLen > 0 ? ' msg="' + message.substring(0, 60) + '"' : ''));
     }
 
     // ARD SetDisplay (0x0d) — 8 bytes
@@ -3334,8 +3406,6 @@ export default class RFB extends EventTargetMixin {
         this._sock.sQpush16(y);         // region y
         this._sock.sQpush16(w);         // region width
         this._sock.sQpush16(h);         // region height
-        Log.Debug("ARD: queued AutoFBUpdate(" + enabled +
-                 ", " + w + "x" + h + ")");
     }
 
     // Request a full (non-incremental) framebuffer update and enable
@@ -3869,6 +3939,9 @@ export default class RFB extends EventTargetMixin {
             case encodings.pseudoEncodingArdSessionEncryption:
                 return this._handleArdSessionEncryption();
 
+            case encodings.pseudoEncodingArdUserInfo:
+                return this._handleArdUserInfo();
+
             case encodings.pseudoEncodingArdCursorPos:
                 return this._handleArdCursorPos();
 
@@ -4035,6 +4108,48 @@ export default class RFB extends EventTargetMixin {
         }
 
         this._updateCursor(rgba, hotx, hoty, w, h);
+
+        return true;
+    }
+
+    // Encoding 1102: ArdUserInfo — logged-in username and avatar image.
+    // An empty username means the login window is active (no user at console).
+    // The avatar PNG uses BGRA channel order (R and B swapped vs standard RGBA).
+    _handleArdUserInfo() {
+        // Minimum: 2-byte nameLen + 4-byte imageSize + 4-byte imageEncoding = 10 bytes
+        if (this._sock.rQwait("ArdUserInfo header", 10)) { return false; }
+
+        const nameLenPeek = this._sock.rQpeekBytes(2);
+        const nameLen = (nameLenPeek[0] << 8) | nameLenPeek[1];
+        const totalHeaderSize = 2 + nameLen + 8;  // nameLen field + name + imageSize + imageEncoding
+
+        if (this._sock.rQwait("ArdUserInfo name+header", totalHeaderSize)) { return false; }
+
+        this._sock.rQskipBytes(2);                         // name length field
+        const nameBytes = this._sock.rQshiftBytes(nameLen);
+        const username = new TextDecoder().decode(nameBytes);
+
+        const imageSize = this._sock.rQshift32() >>> 0;
+        const imageEncoding = this._sock.rQshift32() >>> 0; // 6 = PNG
+
+        if (imageSize > 0) {
+            if (this._sock.rQwait("ArdUserInfo avatar", imageSize)) { return false; }
+            const pngBytes = this._sock.rQshiftBytes(imageSize);
+            this._ardUserAvatarPng = pngBytes;  // BGRA PNG, cached for future use
+        } else {
+            this._ardUserAvatarPng = null;
+        }
+
+        const prevUsername = this._ardUsername;
+        this._ardUsername = username;
+
+        Log.Info("ARD UserInfo: username=" + (username || "(none — login window)") +
+                 " avatarSize=" + (imageSize > 0 ? imageSize + "b enc=" + imageEncoding : "none"));
+
+        if (username !== prevUsername) {
+            this.dispatchEvent(new CustomEvent('arduserinfo',
+                { detail: { username: username, hasAvatar: imageSize > 0 } }));
+        }
 
         return true;
     }
@@ -4292,12 +4407,16 @@ export default class RFB extends EventTargetMixin {
         this._ardCombinedFbWidth = scaledW;
         this._ardCombinedFbHeight = scaledH;
 
-        Log.Debug("ArdDisplayInfo2: v" + version +
+        // Curtain state: server sets bits 0-1 (mask 0x03) when screen is blanked.
+        const serverCurtained = (displayFlags & 0x03) === 0x03;
+
+        Log.Info("ArdDisplayInfo2: v" + version +
                  " fb=" + fbWidth + "x" + fbHeight +
                  " scaled=" + scaledW + "x" + scaledH +
                  " activeDisplay=" + displayId +
                  " displays=" + displayCount +
-                 " flags=0x" + displayFlags.toString(16));
+                 " flags=0x" + displayFlags.toString(16).padStart(8, '0') +
+                 " curtain=" + serverCurtained);
 
         const perDisplaySize = 56;
         const remainingBytes = payloadSize - 20;
@@ -4365,6 +4484,32 @@ export default class RFB extends EventTargetMixin {
         this.dispatchEvent(new CustomEvent(
             "arddisplaylist",
             { detail: { displays: this._ardDisplays } }));
+
+        // Update curtain state from server-confirmed flags.
+        // The server sets bits 0-1 (0x03) in the global flags field when the
+        // screen is blanked; it clears them when the curtain is removed.
+        if (serverCurtained !== this._ardCurtainActive) {
+            Log.Info("ArdDisplayInfo2: curtain state → " +
+                     (serverCurtained ? "CURTAINED" : "VISIBLE") +
+                     " (flags=0x" + displayFlags.toString(16).padStart(8, '0') + ")");
+            this._ardCurtainActive = serverCurtained;
+            this.dispatchEvent(new CustomEvent('ardcurtainchange',
+                { detail: { active: serverCurtained } }));
+        }
+
+        // Update console state from DI2 global flags.
+        // Bit 3 (0x08) = lock screen; bit 4 (0x10) = login window.
+        // Either set means no active user session at the console.
+        const consoleActive = (displayFlags & 0x18) === 0;
+        if (consoleActive !== this._ardConsoleActive) {
+            const reason = (displayFlags & 0x10) ? "LOGIN WINDOW" :
+                           (displayFlags & 0x08) ? "LOCKED" : "ACTIVE";
+            Log.Info("ArdDisplayInfo2: console state → " + reason +
+                     " (flags=0x" + displayFlags.toString(16).padStart(8, '0') + ")");
+            this._ardConsoleActive = consoleActive;
+            this.dispatchEvent(new CustomEvent('ardconsolestate',
+                { detail: { active: consoleActive } }));
+        }
 
         // When the display config changes mid-session (monitor plugged in
         // or removed), the server stops sending FBUs until we acknowledge
