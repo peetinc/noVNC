@@ -1964,12 +1964,13 @@ const UI = {
 
                 const imageData = ctx.createImageData(size, size);
 
-                // Copy BGRA → RGBA (swap R and B channels)
+                // Copy BGRA → RGBA (swap R and B channels, force opaque)
+                // Note: Alpha channel exists but can't be used reliably, so force opaque
                 for (let i = 0; i < data.length; i += 4) {
                     imageData.data[i]     = data[i + 2]; // R from B
                     imageData.data[i + 1] = data[i + 1]; // G
                     imageData.data[i + 2] = data[i];     // B from R
-                    imageData.data[i + 3] = data[i + 3]; // A
+                    imageData.data[i + 3] = 255;         // Force fully opaque
                 }
 
                 ctx.putImageData(imageData, 0, 0);
