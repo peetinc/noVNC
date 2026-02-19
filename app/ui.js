@@ -128,6 +128,7 @@ const UI = {
         UI.addConnectionControlHandlers();
         UI.addClipboardHandlers();
         UI.addSettingsHandlers();
+        UI.updateArdControlSettings(false);  // ensure ARD-only rows start hidden
         document.getElementById("noVNC_status")
             .addEventListener('click', UI.hideStatus);
 
@@ -373,8 +374,18 @@ const UI = {
         UI.addSettingChangeHandler('view_clip');
         UI.addSettingChangeHandler('view_clip', UI.updateViewClip);
         UI.addSettingChangeHandler('shared');
+        UI.addSettingChangeHandler('shared', () => {
+            // When connected to ARD, clicking Shared mode → Control (mode 1).
+            // If the user tries to uncheck it, snap back (radio behaviour).
+            if (UI.rfb && UI.rfb.isAppleARD) UI.setArdControlModeUI(1);
+        });
         UI.addSettingChangeHandler('view_only');
         UI.addSettingChangeHandler('view_only', UI.updateViewOnly);
+        // Exclusive control — ARD only, not persisted
+        document.getElementById('noVNC_setting_exclusive_control')
+            .addEventListener('change', () => {
+                if (UI.rfb && UI.rfb.isAppleARD) UI.setArdControlModeUI(2);
+            });
         UI.addSettingChangeHandler('show_dot');
         UI.addSettingChangeHandler('show_dot', UI.updateShowDotCursor);
         UI.addSettingChangeHandler('keep_device_awake');
@@ -1182,6 +1193,7 @@ const UI = {
         }
 
         UI.updateClipboardButtons(true);
+        UI.updateArdControlSettings(!!(UI.rfb && UI.rfb.isAppleARD));
         UI.updateBeforeUnload();
 
         // Do this last because it can only be used on rendered elements
@@ -1197,6 +1209,7 @@ const UI = {
         // UI.disconnect() won't be used in those cases.
         UI.connected = false;
         UI.updateClipboardButtons(false);
+        UI.updateArdControlSettings(false);
 
         UI.rfb = undefined;
         UI.wakeLockManager.release();
@@ -1892,6 +1905,52 @@ const UI = {
         }
     },
 
+    // Set ARD control mode and enforce radio-button exclusivity across the
+    // three access-mode toggles (Shared / View only / Exclusive control).
+    // mode: 0=Observe, 1=Control, 2=Exclusive
+    setArdControlModeUI(mode) {
+        document.getElementById('noVNC_setting_shared').checked           = (mode === 1);
+        UI.saveSetting('shared', mode === 1);
+        document.getElementById('noVNC_setting_view_only').checked        = (mode === 0);
+        UI.saveSetting('view_only', mode === 0);
+        document.getElementById('noVNC_setting_exclusive_control').checked = (mode === 2);
+
+        if (UI.rfb) UI.rfb.ardControlMode = mode;
+        // rfb.ardControlMode setter drives rfb.viewOnly which handles
+        // keyboard/clipboard grab.  Update toolbar visibility here.
+        UI.updateBeforeUnload();
+        const inputHidden = (mode === 0);
+        document.getElementById('noVNC_keyboard_button')
+            .classList.toggle('noVNC_hidden', inputHidden);
+        document.getElementById('noVNC_toggle_extra_keys_button')
+            .classList.toggle('noVNC_hidden', inputHidden);
+        document.getElementById('noVNC_clipboard_button')
+            .classList.toggle('noVNC_hidden', inputHidden);
+    },
+
+    // Show or hide ARD-specific control mode settings and set the initial
+    // mode based on the current Shared mode / View only toggle state.
+    updateArdControlSettings(isARD) {
+        document.getElementById('noVNC_ard_exclusive_row')
+            .classList.toggle('noVNC_hidden', !isARD);
+
+        if (isARD) {
+            // Shared mode is normally disabled once connected; re-enable it
+            // for ARD so the user can switch between modes mid-session.
+            UI.enableSetting('shared');
+
+            // Map pre-connect toggle state to initial ARD control mode:
+            //   Shared ON, View only OFF → Control (1)
+            //   View only ON (or both OFF / both ON) → Observe (0)
+            const sharedOn   = UI.getSetting('shared');
+            const viewOnlyOn = UI.getSetting('view_only');
+            const initialMode = (sharedOn && !viewOnlyOn) ? 1 : 0;
+            UI.setArdControlModeUI(initialMode);
+        } else {
+            document.getElementById('noVNC_setting_exclusive_control').checked = false;
+        }
+    },
+
     // Double-tap backtick (` `) triggers a full framebuffer refresh.
     // First tap passes through normally; second tap within 300 ms is
     // intercepted (not forwarded to the remote) and fires requestFullUpdate.
@@ -2121,8 +2180,21 @@ const UI = {
 
     updateViewOnly() {
         if (!UI.rfb) return;
-        UI.rfb.viewOnly = UI.getSetting('view_only');
 
+        if (UI.rfb.isAppleARD) {
+            // For ARD: view_only toggle → Observe (mode 0).
+            // Turning it off while in Observe falls back to Control (mode 1).
+            // setArdControlModeUI handles rfb.ardControlMode + toolbar visibility.
+            if (UI.getSetting('view_only')) {
+                UI.setArdControlModeUI(0);
+            } else if (UI.rfb.ardControlMode === 0) {
+                UI.setArdControlModeUI(1);
+            }
+            return;
+        }
+
+        // Non-ARD: existing behaviour unchanged
+        UI.rfb.viewOnly = UI.getSetting('view_only');
         UI.updateBeforeUnload();
 
         // Hide input related buttons in view only mode

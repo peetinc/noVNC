@@ -402,6 +402,9 @@ html {
 #noVNC_control_bar .noVNC_button.noVNC_hidden {
     display: none !important;
 }
+.noVNC_panel li.noVNC_hidden {
+    display: none !important;
+}
 
 /* Panels */
 .noVNC_panel {

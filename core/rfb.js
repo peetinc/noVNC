@@ -150,6 +150,7 @@ export default class RFB extends EventTargetMixin {
         this._ardRSAServerKey = null;
         this._ardQualityPreset = 'thousands';
         this._ardClipboardSessionId = 0;
+        this._ardControlMode = 1;               // 0=Observe, 1=Control, 2=Exclusive
         this._ardClipboardSyncEnabled = true;  // mirrors init AutoPasteboard(1)
         this._ardClipboardManualRequest = false; // one-shot: honour reply even when sync off
         this._ardLastClipboardSent = null;
@@ -369,6 +370,27 @@ export default class RFB extends EventTargetMixin {
                 this._keyboard.grab();
                 this._asyncClipboard.grab();
             }
+        }
+    }
+
+    // ARD control mode: 0=Observe (view-only), 1=Control (shared), 2=Exclusive.
+    // Observe suppresses all input from this client; the local user retains control.
+    // Exclusive blocks the local user's input; the remote screen remains visible.
+    // Control allows both viewer and local user to interact simultaneously.
+    // Setting this on a connected ARD session sends SetMode immediately.
+    get ardControlMode() { return this._ardControlMode; }
+    set ardControlMode(mode) {
+        if (mode !== 0 && mode !== 1 && mode !== 2) {
+            throw new Error("ardControlMode must be 0 (Observe), 1 (Control), or 2 (Exclusive)");
+        }
+        this._ardControlMode = mode;
+        // Observe suppresses viewer input — drive viewOnly so keyboard/clipboard
+        // grabs and all existing _viewOnly guards are handled automatically.
+        this.viewOnly = (mode === 0);
+        if (this._rfbConnectionState === 'connected' && this._rfbAppleARD) {
+            this._sendArdSetMode(mode);
+            this._sock.flush();
+            Log.Info("ARD: control mode → " + ['Observe', 'Control', 'Exclusive'][mode]);
         }
     }
 
@@ -1118,6 +1140,8 @@ export default class RFB extends EventTargetMixin {
                     clearInterval(this._ardFreezeWatchdog);
                     this._ardFreezeWatchdog = null;
                 }
+                // Reset ARD mode state so reconnects start clean
+                this._ardControlMode = 1;
                 this._disconnect();
 
                 this._disconnTimer = setTimeout(() => {
@@ -2740,7 +2764,8 @@ export default class RFB extends EventTargetMixin {
             Log.Info("ARD init [1/10] ViewerInfo");
             this._sendArdViewerInfo();
             Log.Info("ARD init [2/10] SetMode(Control)");
-            this._sendArdSetMode(1);       // 1=Control
+            this._ardControlMode = 1;      // default: Control (shared)
+            this._sendArdSetMode(1);
             Log.Info("ARD init [3/10] SetDisplay(combineAll=1, All)");
             this._sendArdSetDisplay();
             Log.Info("ARD init [4/10] AutoPasteboard(1)");
