@@ -1000,6 +1000,15 @@ html {
     font-size: 1.5em;
 }
 
+/* ARD Session Select dialog - higher z-index than transition overlay */
+#noVNC_ard_session_dlg {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 100; /* Higher than transition overlay (50) */
+}
+
 /* Main container */
 #noVNC_container {
     width: 100%;
