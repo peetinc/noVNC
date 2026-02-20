@@ -4517,7 +4517,8 @@ export default class RFB extends EventTargetMixin {
 
         if (dataSize > 2 * 1024 * 1024) {
             Log.Warn("ArdCursorAlpha: payload too large (" + dataSize + " bytes), skipping");
-            this._sock.rQskipBytes(8);
+            if (this._sock.rQwait("ArdCursor skip", 8 + dataSize)) { return false; }
+            this._sock.rQskipBytes(8 + dataSize);
             return true;
         }
 

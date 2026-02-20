@@ -2312,9 +2312,9 @@ const UI = {
     // mode: 0=Observe, 1=Control, 2=Exclusive
     setArdControlModeUI(mode) {
         document.getElementById('noVNC_setting_shared').checked           = (mode === 1);
-        UI.saveSetting('shared', mode === 1);
+        UI.saveSetting('shared');
         document.getElementById('noVNC_setting_view_only').checked        = (mode === 0);
-        UI.saveSetting('view_only', mode === 0);
+        UI.saveSetting('view_only');
         document.getElementById('noVNC_setting_exclusive_control').checked = (mode === 2);
 
         if (UI.rfb) UI.rfb.ardControlMode = mode;
