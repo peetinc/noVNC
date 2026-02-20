@@ -341,6 +341,10 @@ const UI = {
             .addEventListener('click', UI.rejectServer);
         document.getElementById("noVNC_credentials_button")
             .addEventListener('click', UI.setCredentials);
+        document.getElementById("noVNC_ard_session_share_button")
+            .addEventListener('click', UI.ardSessionSelectShare);
+        document.getElementById("noVNC_ard_session_virtual_button")
+            .addEventListener('click', UI.ardSessionSelectVirtual);
     },
 
     addClipboardHandlers() {
@@ -1123,6 +1127,7 @@ const UI = {
         UI.rfb.addEventListener("arddisplaylist", UI.ardDisplayListUpdated);
         UI.rfb.addEventListener("serververification", UI.serverVerify);
         UI.rfb.addEventListener("credentialsrequired", UI.credentials);
+        UI.rfb.addEventListener("ardsessionselect", UI.ardSessionSelect);
         UI.rfb.addEventListener("securityfailure", UI.securityFailed);
         UI.rfb.addEventListener("clippingviewport", UI.updateViewDrag);
         UI.rfb.addEventListener("capabilities", UI.updatePowerButton);
@@ -1324,6 +1329,37 @@ const UI = {
  * ==============
  *   PASSWORD
  * ------v------*/
+
+    ardSessionSelect(e) {
+        const username = e.detail.username;
+        const hasUser = e.detail.hasConsoleUser;
+
+        // Only show picker if console user is logged in
+        if (!hasUser) {
+            return; // Auto-connects to console
+        }
+
+        // Show session select dialog
+        const usernameSpan = document.getElementById('noVNC_ard_session_username');
+        usernameSpan.textContent = username;
+
+        document.getElementById('noVNC_ard_session_dlg').classList.add('noVNC_open');
+
+        Log.Info("ARD Session Select: Waiting for user to choose session type");
+        UI.showStatus(_("Choose session type"), "normal");
+    },
+
+    ardSessionSelectShare(e) {
+        e.preventDefault();
+        document.getElementById('noVNC_ard_session_dlg').classList.remove('noVNC_open');
+        UI.rfb.selectSessionType(1); // ConnectToConsole
+    },
+
+    ardSessionSelectVirtual(e) {
+        e.preventDefault();
+        document.getElementById('noVNC_ard_session_dlg').classList.remove('noVNC_open');
+        UI.rfb.selectSessionType(2); // ConnectToVirtualDisplay
+    },
 
     credentials(e) {
         // FIXME: handle more types

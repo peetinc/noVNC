@@ -583,6 +583,20 @@ export default class RFB extends EventTargetMixin {
         this._resumeAuthentication();
     }
 
+    selectSessionType(command) {
+        if (this._rfbInitState !== 'SessionSelectWaiting') {
+            Log.Warn("selectSessionType called but not in SessionSelectWaiting state");
+            return;
+        }
+
+        Log.Info("ARD SessionSelect: User selected command=" + command +
+                 " (" + (command === 1 ? "Share Display" : command === 2 ? "Virtual Display" : "Unknown") + ")");
+
+        this._sendSessionCommand(command);
+        this._rfbInitState = 'SessionSelectResult';
+        this._initMsg(); // Resume protocol handling
+    }
+
     get isAppleARD() { return this._rfbAppleARD; }
     get ardCombineAllDisplays() { return this._ardCombineAllDisplays; }
     get ardSelectedDisplayId() { return this._ardSelectedDisplayId; }
@@ -3034,11 +3048,26 @@ export default class RFB extends EventTargetMixin {
                  " allowedCommands=0x" + allowedCommands.toString(16).padStart(8, '0') +
                  " consoleUser=" + (username || "(none)"));
 
-        // Send SessionCommand: ConnectToConsole (command=1)
-        // Default to always connect to console (physical display)
-        this._sendSessionCommand(1); // 1 = ConnectToConsole
+        // Dispatch event to let UI show session type picker
+        this.dispatchEvent(new CustomEvent('ardsessionselect', {
+            detail: {
+                username: username,
+                allowedCommands: allowedCommands,
+                hasConsoleUser: username.length > 0
+            }
+        }));
 
-        this._rfbInitState = 'SessionSelectResult';
+        // If no console user logged in, auto-connect to console (HDMI output)
+        if (!username || username.length === 0) {
+            Log.Info("ARD SessionSelect: No console user, auto-connecting to Console (HDMI)");
+            this._sendSessionCommand(1); // 1 = ConnectToConsole
+            this._rfbInitState = 'SessionSelectResult';
+        } else {
+            // Console user logged in - show picker to choose Share Display vs Virtual Display
+            Log.Info("ARD SessionSelect: Console user '" + username + "', waiting for picker choice");
+            this._rfbInitState = 'SessionSelectWaiting';
+        }
+
         return true;
     }
 
@@ -3200,6 +3229,11 @@ export default class RFB extends EventTargetMixin {
 
             case 'SessionSelectInfo':
                 return this._handleSessionInfo();
+
+            case 'SessionSelectWaiting':
+                // Waiting for UI to call selectSessionType()
+                // This state doesn't read from socket, just waits
+                return false;
 
             case 'SessionSelectResult':
                 return this._handleSessionResult();
