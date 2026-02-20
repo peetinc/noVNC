@@ -483,11 +483,10 @@ export default class Websock {
             const ciphertextLen = (this._encRecvBuf[0] << 8) | this._encRecvBuf[1];
 
             if (ciphertextLen === 0 || ciphertextLen % 16 !== 0) {
-                Log.Warn("ARD: invalid encrypted packet length " +
-                         ciphertextLen + " (first bytes: " +
-                         Array.from(this._encRecvBuf.slice(0, Math.min(8, this._encRecvBuf.length)))
-                             .map(b => b.toString(16).padStart(2, '0')).join(' ') + ")");
-                break;
+                Log.Error("ARD: invalid encrypted packet length " +
+                          ciphertextLen + " — disconnecting");
+                this.close();
+                return false;
             }
 
             if (this._encRecvBuf.length < 2 + ciphertextLen) {
@@ -507,8 +506,9 @@ export default class Websock {
             this._encRecvIV = ciphertext.slice(ciphertext.length - 16);
 
             if (!cleartext) {
-                Log.Warn("ARD: encrypted packet decryption failed");
-                continue;
+                Log.Error("ARD: encrypted packet decryption failed — disconnecting");
+                this.close();
+                return false;
             }
 
             // Extract payload
