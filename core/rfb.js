@@ -3026,7 +3026,8 @@ export default class RFB extends EventTargetMixin {
         // [u16be bodySize][u16be version=0x0100][u32be allowedCommands][u32 reserved][null-terminated username]
         if (this._sock.rQwait("SessionInfo header", 2)) { return false; }
 
-        const bodySize = this._sock.rQpeek16();
+        const bodySizeBytes = this._sock.rQpeekBytes(2);
+        const bodySize = (bodySizeBytes[0] << 8) | bodySizeBytes[1];
         if (this._sock.rQwait("SessionInfo body", bodySize, 2)) { return false; }
 
         this._sock.rQskipBytes(2); // bodySize
