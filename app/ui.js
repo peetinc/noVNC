@@ -49,7 +49,6 @@ const UI = {
     reconnectUsername: null,
     reconnectAttempt: 0,
     reconnectMaxAttempts: 10,
-    reconnectEllipsisInterval: null,
     lastDisconnectTime: 0,
     showArdUserAvatar: true,
     showArdScreenLock: true,
@@ -1200,29 +1199,11 @@ const UI = {
     },
 
     startReconnectAnimation(attempt) {
-        // Stop any existing animation
-        if (UI.reconnectEllipsisInterval) {
-            clearInterval(UI.reconnectEllipsisInterval);
-        }
-
         const transitionText = document.getElementById('noVNC_transition_text');
-        let ellipsisCount = 0;
-
-        const updateText = () => {
-            const ellipsis = '.'.repeat((ellipsisCount % 3) + 1);
-            transitionText.textContent = `Reconnecting${ellipsis} (attempt ${attempt}/${UI.reconnectMaxAttempts})`;
-            ellipsisCount++;
-        };
-
-        updateText();
-        UI.reconnectEllipsisInterval = setInterval(updateText, 500);
+        transitionText.textContent = `Reconnecting... (attempt ${attempt}/${UI.reconnectMaxAttempts})`;
     },
 
     stopReconnectAnimation() {
-        if (UI.reconnectEllipsisInterval) {
-            clearInterval(UI.reconnectEllipsisInterval);
-            UI.reconnectEllipsisInterval = null;
-        }
     },
 
     clearCachedCredentials() {
@@ -2150,6 +2131,18 @@ const UI = {
             return;
         }
 
+        const username = UI.rfb ? UI.rfb.ardUsername : '';
+        const useGenericIcon = !username ||
+            username.toLowerCase() === 'system administrator';
+
+        if (useGenericIcon) {
+            // Login window or system account — show generic user icon
+            avatarImg.src = 'app/images/user.svg';
+            avatarDiv.style.display = 'block';
+            avatarDiv.title = username || 'Login window';
+            return;
+        }
+
         if (UI.rfb && UI.rfb._ardUserAvatarPng) {
             const data = UI.rfb._ardUserAvatarPng;
 
@@ -2157,6 +2150,9 @@ const UI = {
             const isPNG = data.length > 8 &&
                          data[0] === 0x89 && data[1] === 0x50 &&
                          data[2] === 0x4E && data[3] === 0x47;
+
+            Log.Info("ARD avatar: " + data.length + " bytes, isPNG=" + isPNG +
+                     ", alpha[0]=" + data[3] + (isPNG ? "" : (data[3] === 0xFF ? " (BGRA)" : " (RGBA)")));
 
             if (isPNG) {
                 // ARD sends PNG with BGRA channel order — decode to canvas,
@@ -2181,7 +2177,7 @@ const UI = {
                     ctx.putImageData(imgData, 0, 0);
                     avatarImg.src = canvas.toDataURL('image/png');
                     avatarDiv.style.display = 'block';
-                    avatarDiv.title = (UI.rfb.ardUsername || 'User') + ' is signed in';
+                    avatarDiv.title = username + ' is signed in';
                 };
                 tmpImg.onerror = function() {
                     URL.revokeObjectURL(url);
@@ -2189,7 +2185,10 @@ const UI = {
                 };
                 tmpImg.src = url;
             } else {
-                // Raw BGRA pixel data
+                // Raw pixel data — server sends two formats:
+                //   alpha=0xFF → BGRA (needs R↔B swap)
+                //   alpha=0x00 → RGBA (already correct)
+                const isBGRA = data[3] === 0xFF;
                 const size = Math.sqrt(data.length / 4);
                 if (size % 1 === 0) { // Valid square dimensions
                     const canvas = document.createElement('canvas');
@@ -2198,28 +2197,27 @@ const UI = {
                     const ctx = canvas.getContext('2d', { alpha: false });
                     const imageData = ctx.createImageData(size, size);
 
-                    // ARD sends BGRA, canvas expects RGBA - swap B and R
-                    // Force alpha to 255 (server sends inconsistent alpha)
                     for (let i = 0; i < data.length; i += 4) {
-                        imageData.data[i]     = data[i + 2]; // R ← B
-                        imageData.data[i + 1] = data[i + 1]; // G ← G
-                        imageData.data[i + 2] = data[i];     // B ← R
-                        imageData.data[i + 3] = 255;         // Force opaque
+                        imageData.data[i]     = data[i + (isBGRA ? 2 : 0)]; // R
+                        imageData.data[i + 1] = data[i + 1];                // G
+                        imageData.data[i + 2] = data[i + (isBGRA ? 0 : 2)]; // B
+                        imageData.data[i + 3] = 255;                        // Force opaque
                     }
 
                     ctx.putImageData(imageData, 0, 0);
                     avatarImg.src = canvas.toDataURL('image/png');
                     avatarDiv.style.display = 'block';
-                    avatarDiv.title = (UI.rfb.ardUsername || 'User') + ' is signed in';
+                    avatarDiv.title = username + ' is signed in';
                 } else {
                     Log.Error("ARD avatar: invalid dimensions, data length=" + data.length);
                     avatarDiv.style.display = 'none';
                 }
             }
         } else {
-            avatarDiv.style.display = 'none';
-            avatarImg.src = '';
-            avatarDiv.title = '';
+            // Real user but no avatar data — show generic icon
+            avatarImg.src = 'app/images/user.svg';
+            avatarDiv.style.display = 'block';
+            avatarDiv.title = username + ' is signed in';
         }
     },
 

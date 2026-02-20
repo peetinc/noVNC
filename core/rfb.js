@@ -2279,11 +2279,12 @@ export default class RFB extends EventTargetMixin {
     }
 
     _negotiateRSATunnelAuth() {
-        Log.Info("RSATunnel (type 33) authentication");
+        Log.Info("RSATunnel (type 33) stage " + this._ardRSATunnelStage);
 
         // Stage 0: Check credentials
         if (this._rfbCredentials.username === undefined ||
             this._rfbCredentials.password === undefined) {
+            Log.Info("RSATunnel: waiting for credentials from user");
             this.dispatchEvent(new CustomEvent(
                 "credentialsrequired",
                 { detail: { types: ["username", "password"] } }));
@@ -2321,40 +2322,40 @@ export default class RFB extends EventTargetMixin {
 
             this._rfbCredentials.ardRSATunnelBlob = null;
             this._ardRSATunnelStage = 4;
-            Log.Info("RSATunnel: sent credential blob (" + blobSize + " bytes)");
+            Log.Info("RSATunnel: sent credential blob (" + blobSize + " bytes), awaiting response...");
         }
 
-        // Stage 4: Wait for RSA response
+        // Stage 4: Wait for RSA response — [u32be payloadLen][payload]
+        // Server always sends payloadLen=0 (success ack), actual auth
+        // result comes in the subsequent VNC SecurityResult.
         if (this._ardRSATunnelStage === 4) {
-            if (this._sock.rQwait("RSATunnel response", 4)) { return false; }
+            if (this._sock.rQwait("RSATunnel response", 4)) {
+                Log.Debug("RSATunnel: waiting for server response");
+                return false;
+            }
             const responseLen = this._sock.rQshift32();
-            if (responseLen > 4096) {
-                return this._fail("RSATunnel: response too large (" +
-                                  responseLen + " bytes)");
-            }
+            Log.Info("RSATunnel: response payloadLen=" + responseLen);
+
             if (responseLen > 0) {
-                if (this._sock.rQwait("RSATunnel response body", responseLen, 4)) { return false; }
-                const responseData = this._sock.rQshiftBytes(responseLen);
-                if (responseData.length >= 2) {
-                    const view = new DataView(responseData.buffer, responseData.byteOffset);
-                    const status = view.getUint16(0, true);
-                    if (status !== 0) {
-                        Log.Warn("RSATunnel: server response status: " + status +
-                                 " — clearing cached RSA key");
-                        // Cached key may be stale (server changed or different host
-                        // behind the same gateway). Clear it so the next attempt
-                        // fetches a fresh key.
-                        this._clearCachedRSAKey();
-                        if (status === 81 || status === 255) {
-                            return this._fail("RSATunnel authentication denied");
-                        }
-                        return this._fail("RSATunnel authentication failed (status " +
-                                          status + ") — please retry");
-                    }
+                // Unexpected — consume and log the payload
+                if (responseLen > 4096) {
+                    return this._fail("RSATunnel: response too large (" +
+                                      responseLen + " bytes)");
                 }
+                if (this._sock.rQwait("RSATunnel response body",
+                                       responseLen, 4)) {
+                    return false;
+                }
+                const body = this._sock.rQshiftBytes(responseLen);
+                Log.Warn("RSATunnel: unexpected response payload (" +
+                         responseLen + " bytes): " +
+                         Array.from(body.slice(0, 32)).map(
+                             b => b.toString(16).padStart(2, '0')).join(' '));
             }
+
             this._ardRSATunnelStage = 0;
             this._rfbInitState = "SecurityResult";
+            Log.Info("RSATunnel: → SecurityResult");
             return true;
         }
 
@@ -2362,12 +2363,12 @@ export default class RFB extends EventTargetMixin {
         if (this._ardRSATunnelStage === 0) {
             const cachedKey = this._getCachedRSAKey();
             if (cachedKey) {
-                Log.Debug("RSATunnel: using cached server key");
+                Log.Info("RSATunnel: using cached server key");
                 this._ardRSAServerKey = cachedKey;
                 this._ardRSATunnelStage = 2;
             } else {
                 // Send key request
-                Log.Debug("RSATunnel: requesting server public key");
+                Log.Info("RSATunnel: requesting server public key");
 
                 // [u32be 10][u16le 1][u32le RSA1][u16be 0][u16 0] = 14 bytes
                 this._sock.sQpush32(10);                // payload length (BE)
@@ -2386,8 +2387,12 @@ export default class RFB extends EventTargetMixin {
 
         // Stage 1: Read key response
         if (this._ardRSATunnelStage === 1) {
-            if (this._sock.rQwait("RSATunnel key response length", 4)) { return false; }
+            if (this._sock.rQwait("RSATunnel key response length", 4)) {
+                Log.Debug("RSATunnel: waiting for key response");
+                return false;
+            }
             const payloadLen = this._sock.rQshift32(); // u32 BE
+            Log.Info("RSATunnel: key response payload=" + payloadLen + " bytes");
             if (payloadLen > 8192) {
                 return this._fail("RSATunnel: key response too large (" +
                                   payloadLen + " bytes)");
@@ -2784,7 +2789,7 @@ export default class RFB extends EventTargetMixin {
 
         if (status === 0) { // OK
             this._rfbInitState = 'ClientInitialisation';
-            Log.Debug('Authentication OK');
+            Log.Info('Authentication OK');
             // Clear credentials now that auth is complete
             if (this._rfbCredentials) {
                 this._rfbCredentials.username = null;
@@ -2792,6 +2797,20 @@ export default class RFB extends EventTargetMixin {
             }
             return true;
         } else {
+            Log.Warn("SecurityResult: status=" + status);
+
+            // ARD (003.889) does NOT send a SecurityReason string after
+            // failed SecurityResult — it just closes the connection.
+            // Standard RFB >= 3.8 expects a reason, but ARD skips it.
+            if (this._rfbAppleARD) {
+                this.dispatchEvent(new CustomEvent(
+                    "securityfailure",
+                    { detail: { status: status,
+                                reason: "Authentication failed" } }));
+                return this._fail("Authentication failed (status " +
+                                  status + ")");
+            }
+
             if (this._rfbVersion >= 3.8) {
                 this._rfbInitState = "SecurityReason";
                 this._securityContext = "security result";
