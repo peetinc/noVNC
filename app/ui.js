@@ -2168,19 +2168,35 @@ const UI = {
                          data[2] === 0x4E && data[3] === 0x47;
 
             if (isPNG) {
-                // It's an actual PNG file - create blob URL
+                // ARD sends PNG with BGRA channel order — decode to canvas,
+                // swap R↔B, then export as corrected PNG for display.
                 const blob = new Blob([data], { type: 'image/png' });
                 const url = URL.createObjectURL(blob);
-                avatarImg.onload = function() {
+                const tmpImg = new Image();
+                tmpImg.onload = function() {
                     URL.revokeObjectURL(url);
+                    const canvas = document.createElement('canvas');
+                    canvas.width = tmpImg.width;
+                    canvas.height = tmpImg.height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(tmpImg, 0, 0);
+                    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    const px = imgData.data;
+                    for (let i = 0; i < px.length; i += 4) {
+                        const tmp = px[i];      // R (actually B)
+                        px[i] = px[i + 2];      // R ← B
+                        px[i + 2] = tmp;         // B ← R
+                    }
+                    ctx.putImageData(imgData, 0, 0);
+                    avatarImg.src = canvas.toDataURL('image/png');
                     avatarDiv.style.display = 'block';
                     avatarDiv.title = (UI.rfb.ardUsername || 'User') + ' is signed in';
                 };
-                avatarImg.onerror = function() {
+                tmpImg.onerror = function() {
                     URL.revokeObjectURL(url);
                     avatarDiv.style.display = 'none';
                 };
-                avatarImg.src = url;
+                tmpImg.src = url;
             } else {
                 // Raw BGRA pixel data
                 const size = Math.sqrt(data.length / 4);
