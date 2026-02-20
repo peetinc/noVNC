@@ -46,6 +46,9 @@ const UI = {
     inhibitReconnect: true,
     reconnectCallback: null,
     reconnectPassword: null,
+    reconnectAttempt: 0,
+    reconnectMaxAttempts: 10,
+    reconnectEllipsisInterval: null,
 
     wakeLockManager: new WakeLockManager(),
 
@@ -1161,6 +1164,32 @@ const UI = {
         // Don't display the connection settings until we're actually disconnected
     },
 
+    startReconnectAnimation(attempt) {
+        // Stop any existing animation
+        if (UI.reconnectEllipsisInterval) {
+            clearInterval(UI.reconnectEllipsisInterval);
+        }
+
+        const transitionText = document.getElementById('noVNC_transition_text');
+        let ellipsisCount = 0;
+
+        const updateText = () => {
+            const ellipsis = '.'.repeat((ellipsisCount % 3) + 1);
+            transitionText.textContent = `Reconnecting${ellipsis} (attempt ${attempt}/${UI.reconnectMaxAttempts})`;
+            ellipsisCount++;
+        };
+
+        updateText();
+        UI.reconnectEllipsisInterval = setInterval(updateText, 500);
+    },
+
+    stopReconnectAnimation() {
+        if (UI.reconnectEllipsisInterval) {
+            clearInterval(UI.reconnectEllipsisInterval);
+            UI.reconnectEllipsisInterval = null;
+        }
+    },
+
     reconnect() {
         UI.reconnectCallback = null;
 
@@ -1178,6 +1207,8 @@ const UI = {
             UI.reconnectCallback = null;
         }
 
+        UI.stopReconnectAnimation();
+        UI.reconnectAttempt = 0;
         UI.updateVisualState('disconnected');
 
         UI.openControlbar();
@@ -1187,6 +1218,8 @@ const UI = {
     connectFinished(e) {
         UI.connected = true;
         UI.inhibitReconnect = false;
+        UI.reconnectAttempt = 0; // Reset on successful connection
+        UI.stopReconnectAnimation();
 
         let msg;
         if (UI.getSetting('encrypt')) {
@@ -1241,12 +1274,39 @@ const UI = {
                 UI.showStatus(_("Failed to connect to server"), 'error');
             }
         }
-        // If reconnecting is allowed process it now
-        if (UI.getSetting('reconnect', false) === true && !UI.inhibitReconnect) {
+        // ARD: Always auto-reconnect (like Screen Sharing.app)
+        const isARD = wasConnected && UI.reconnectPassword !== null;
+        const shouldReconnect = isARD || (UI.getSetting('reconnect', false) === true);
+
+        if (shouldReconnect && !UI.inhibitReconnect) {
             UI.updateVisualState('reconnecting');
 
-            const delay = parseInt(UI.getSetting('reconnect_delay'));
-            UI.reconnectCallback = setTimeout(UI.reconnect, delay);
+            // ARD uses Screen Sharing's fast reconnect pattern
+            if (isARD) {
+                UI.reconnectAttempt++;
+
+                // Backoff delays matching Screen Sharing: 100ms, 2s, 5s, 10s, 15s, ...
+                let delay;
+                if (UI.reconnectAttempt === 1) delay = 100;
+                else if (UI.reconnectAttempt === 2) delay = 2000;
+                else if (UI.reconnectAttempt === 3) delay = 5000;
+                else delay = Math.min(10000 + (UI.reconnectAttempt - 4) * 5000, 30000);
+
+                if (UI.reconnectAttempt >= UI.reconnectMaxAttempts) {
+                    UI.showStatus(_("Reconnect failed after ") + UI.reconnectAttempt + _(" attempts"), 'error');
+                    UI.updateVisualState('disconnected');
+                    UI.openControlbar();
+                    UI.openConnectPanel();
+                    return;
+                }
+
+                UI.startReconnectAnimation(UI.reconnectAttempt);
+                UI.reconnectCallback = setTimeout(UI.reconnect, delay);
+            } else {
+                // Standard reconnect using setting
+                const delay = parseInt(UI.getSetting('reconnect_delay'));
+                UI.reconnectCallback = setTimeout(UI.reconnect, delay);
+            }
             return;
         } else {
             UI.updateVisualState('disconnected');
