@@ -722,7 +722,6 @@ html {
 
 /* ARD user avatar */
 #noVNC_ard_user_avatar {
-    display: none;
     padding: 4px;
     overflow: hidden;
 }

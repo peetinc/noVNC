@@ -1304,11 +1304,7 @@ const UI = {
         UI.updateArdControlSettings();
         UI.updateCurtainButton();
 
-        // Hide ARD user avatar
-        const avatarDiv = document.getElementById('noVNC_ard_user_avatar');
-        if (avatarDiv) {
-            avatarDiv.style.display = 'none';
-        }
+        UI._hideAvatar();
 
         UI.rfb = undefined;
         UI.wakeLockManager.release();
@@ -2120,30 +2116,41 @@ const UI = {
         UI.updateCurtainButton();
     },
 
+    _showAvatar(src, title) {
+        const div = document.getElementById('noVNC_ard_user_avatar');
+        const img = document.getElementById('noVNC_ard_user_avatar_img');
+        img.src = src;
+        div.title = title;
+        div.classList.remove('noVNC_hidden');
+    },
+
+    _hideAvatar() {
+        const div = document.getElementById('noVNC_ard_user_avatar');
+        const img = document.getElementById('noVNC_ard_user_avatar_img');
+        div.classList.add('noVNC_hidden');
+        img.removeAttribute('src');
+        div.title = '';
+    },
+
     ardUserInfoChanged(e) {
         UI.updateCurtainButton();
 
-        // Update user avatar in sidebar
         const avatarDiv = document.getElementById('noVNC_ard_user_avatar');
-        const avatarImg = document.getElementById('noVNC_ard_user_avatar_img');
-        if (!UI.showArdUserAvatar) {
-            avatarDiv.style.display = 'none';
+        if (!UI.showArdUserAvatar || !UI.rfb) {
+            UI._hideAvatar();
             return;
         }
 
-        const username = UI.rfb ? UI.rfb.ardUsername : '';
+        const username = UI.rfb.ardUsername || '';
         const useGenericIcon = !username ||
             username.toLowerCase() === 'system administrator';
 
         if (useGenericIcon) {
-            // Login window or system account — show generic user icon
-            avatarImg.src = 'app/images/user.svg';
-            avatarDiv.style.display = 'block';
-            avatarDiv.title = username || 'Login window';
+            UI._showAvatar('app/images/user.svg', username || 'Login window');
             return;
         }
 
-        if (UI.rfb && UI.rfb._ardUserAvatarPng) {
+        if (UI.rfb._ardUserAvatarPng) {
             const data = UI.rfb._ardUserAvatarPng;
 
             // Check if it's a PNG file (starts with PNG signature: 89 50 4E 47)
@@ -2175,13 +2182,12 @@ const UI = {
                         px[i + 2] = tmp;         // B ← R
                     }
                     ctx.putImageData(imgData, 0, 0);
-                    avatarImg.src = canvas.toDataURL('image/png');
-                    avatarDiv.style.display = 'block';
-                    avatarDiv.title = username + ' is signed in';
+                    UI._showAvatar(canvas.toDataURL('image/png'),
+                                   username + ' is signed in');
                 };
                 tmpImg.onerror = function() {
                     URL.revokeObjectURL(url);
-                    avatarDiv.style.display = 'none';
+                    UI._hideAvatar();
                 };
                 tmpImg.src = url;
             } else {
@@ -2205,19 +2211,16 @@ const UI = {
                     }
 
                     ctx.putImageData(imageData, 0, 0);
-                    avatarImg.src = canvas.toDataURL('image/png');
-                    avatarDiv.style.display = 'block';
-                    avatarDiv.title = username + ' is signed in';
+                    UI._showAvatar(canvas.toDataURL('image/png'),
+                                   username + ' is signed in');
                 } else {
                     Log.Error("ARD avatar: invalid dimensions, data length=" + data.length);
-                    avatarDiv.style.display = 'none';
+                    UI._hideAvatar();
                 }
             }
         } else {
             // Real user but no avatar data — show generic icon
-            avatarImg.src = 'app/images/user.svg';
-            avatarDiv.style.display = 'block';
-            avatarDiv.title = username + ' is signed in';
+            UI._showAvatar('app/images/user.svg', username + ' is signed in');
         }
     },
 
