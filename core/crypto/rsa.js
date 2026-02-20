@@ -98,9 +98,13 @@ export class RSACipher {
             return null;
         }
         const ps = new Uint8Array(this._keyBytes - message.length - 3);
+        // PKCS#1 v1.5 padding requires uniformly random non-zero bytes.
+        // Use rejection sampling to avoid bias.
         window.crypto.getRandomValues(ps);
         for (let i = 0; i < ps.length; i++) {
-            ps[i] = Math.floor(ps[i] * 254 / 255 + 1);
+            while (ps[i] === 0) {
+                ps[i] = window.crypto.getRandomValues(new Uint8Array(1))[0];
+            }
         }
         const em = new Uint8Array(this._keyBytes);
         em[1] = 0x02;

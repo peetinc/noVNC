@@ -2224,6 +2224,11 @@ export default class RFB extends EventTargetMixin {
 
         let keyLength = this._sock.rQshift16();
 
+        if (keyLength < 128) { // minimum 1024-bit DH
+            return this._fail("ARD DH key too short (" +
+                (keyLength * 8) + " bits, minimum 1024)");
+        }
+
         if (this._sock.rQwait("read ard keylength", keyLength*2, 4)) { return false; }
 
         // read the server values
@@ -2397,7 +2402,23 @@ export default class RFB extends EventTargetMixin {
             const keyData = payload.slice(6, 6 + keyDataLen);
 
             const serverKey = RSACipher.parsePKCS1PublicKey(keyData);
-            Log.Info("RSATunnel: received server key (" + (serverKey.n.length * 8) + "-bit)");
+            const keyBits = serverKey.n.length * 8;
+            Log.Info("RSATunnel: received server key (" + keyBits + "-bit)");
+
+            if (keyBits < 2048) {
+                Log.Warn("RSATunnel: server RSA key is only " + keyBits +
+                         " bits (2048+ recommended)");
+            }
+
+            // TOFU: warn if server key changed since last connection
+            const newFingerprint = this._rsaKeyFingerprint(serverKey);
+            const cached = this._getCachedRSAKey();
+            if (cached && cached.fingerprint &&
+                cached.fingerprint !== newFingerprint) {
+                Log.Warn("RSATunnel: SERVER KEY HAS CHANGED! Old fingerprint: " +
+                         cached.fingerprint + " New: " + newFingerprint);
+                this._clearCachedRSAKey();
+            }
 
             this._ardRSAServerKey = serverKey;
             this._cacheRSAKey(serverKey);
@@ -2451,6 +2472,15 @@ export default class RFB extends EventTargetMixin {
         }
     }
 
+    _rsaKeyFingerprint(keyObj) {
+        // SHA-1 fingerprint of the raw modulus bytes for TOFU comparison
+        const data = new Uint8Array(keyObj.n.length + keyObj.e.length);
+        data.set(keyObj.n, 0);
+        data.set(keyObj.e, keyObj.n.length);
+        return Array.from(SHA1(data)).map(
+            b => b.toString(16).padStart(2, '0')).join(':');
+    }
+
     _getCachedRSAKey() {
         if (!this._url) return null;
         try {
@@ -2459,7 +2489,8 @@ export default class RFB extends EventTargetMixin {
             const parsed = JSON.parse(stored);
             return {
                 n: new Uint8Array(parsed.n),
-                e: new Uint8Array(parsed.e)
+                e: new Uint8Array(parsed.e),
+                fingerprint: parsed.fingerprint || null
             };
         } catch (e) {
             return null;
@@ -2469,9 +2500,11 @@ export default class RFB extends EventTargetMixin {
     _cacheRSAKey(keyObj) {
         if (!this._url) return;
         try {
+            const fingerprint = this._rsaKeyFingerprint(keyObj);
             localStorage.setItem('noVNC_rsaKey_' + this._url, JSON.stringify({
                 n: Array.from(keyObj.n),
-                e: Array.from(keyObj.e)
+                e: Array.from(keyObj.e),
+                fingerprint: fingerprint
             }));
         } catch (e) {
             Log.Warn("Failed to cache RSA key: " + e);
