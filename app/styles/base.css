@@ -693,8 +693,8 @@ html {
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
-/* ARD clipboard buttons */
-.noVNC_clipboard_btn {
+/* ARD toolbar icon buttons (clipboard, curtain) */
+.noVNC_icon_btn {
     background: none;
     border: none;
     cursor: pointer;
@@ -702,12 +702,12 @@ html {
     color: rgba(255, 255, 255, 0.8);
     line-height: 0;
 }
-.noVNC_clipboard_btn svg {
+.noVNC_icon_btn svg {
     width: 24px;
     height: 24px;
     display: block;
 }
-.noVNC_clipboard_btn:disabled {
+.noVNC_icon_btn:disabled {
     opacity: 0.35;
     cursor: default;
 }
@@ -715,9 +715,39 @@ html {
 #noVNC_clipboard_sync_button:not(.noVNC_selected):not(:disabled) {
     opacity: 0.4;
 }
-.noVNC_clipboard_btn:not(:disabled):hover {
+.noVNC_icon_btn:not(:disabled):hover {
     color: #fff;
     opacity: 1;
+}
+
+/* ARD user avatar */
+#noVNC_ard_user_avatar {
+    display: none;
+    padding: 4px;
+    overflow: hidden;
+}
+#noVNC_ard_user_avatar_img {
+    width: 25px;
+    height: 25px;
+    border-radius: 50%;
+    display: block;
+}
+
+/* ARD curtain panel */
+.noVNC_heading_icon {
+    width: 1em;
+    height: 1em;
+    vertical-align: middle;
+    margin-right: 0.3em;
+}
+#noVNC_curtain_message {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* ARD session select dialog */
+.noVNC_session_info {
+    margin: 1em 0;
 }
 
 /* Shutdown/Reboot */
