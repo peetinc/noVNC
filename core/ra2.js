@@ -247,10 +247,13 @@ export default class RSAAESAuthenticationState extends EventTargetMixin {
         if (serverHashReceived === null) {
             throw new Error("RA2: failed to authenticate the message");
         }
+        // Constant-time comparison to prevent timing oracle attacks
+        let diff = 0;
         for (let i = 0; i < 20; i++) {
-            if (serverHashReceived[i] !== serverHash[i]) {
-                throw new Error("RA2: wrong server hash");
-            }
+            diff |= serverHashReceived[i] ^ serverHash[i];
+        }
+        if (diff !== 0) {
+            throw new Error("RA2: wrong server hash");
         }
 
         // 7: Receive subtype

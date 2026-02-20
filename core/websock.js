@@ -275,7 +275,7 @@ export default class Websock {
         packet.set(ciphertext, 2);
 
         this._websocket.send(packet);
-        this._encSendSeq++;
+        this._encSendSeq = (this._encSendSeq + 1) >>> 0;
     }
 
     _sQensureSpace(bytes) {
@@ -537,7 +537,7 @@ export default class Websock {
                 }
             }
 
-            this._encRecvSeq++;
+            this._encRecvSeq = (this._encRecvSeq + 1) >>> 0;
 
             // Reset rQ if all data has been consumed
             if (this._rQlen == this._rQi) {

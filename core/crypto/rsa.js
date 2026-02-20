@@ -118,19 +118,23 @@ export class RSACipher {
         const msgBigInt = u8ArrayToBigInt(message);
         const emBigInt = modPow(msgBigInt, this._dBigInt, this._nBigInt);
         const em = bigIntToU8Array(emBigInt, this._keyBytes);
-        if (em[0] !== 0x00 || em[1] !== 0x02) {
+
+        // Constant-time PKCS#1 v1.5 padding validation to prevent
+        // Bleichenbacher-style padding oracle attacks.
+        // Always scan all bytes — no early returns based on padding content.
+        let valid = ((em[0] === 0x00) & (em[1] === 0x02)) | 0;
+        let separatorIdx = 0;
+        let found = 0;
+        for (let i = 2; i < em.length; i++) {
+            const isZero = (1 - ((em[i] | (-em[i])) >>> 31)); // 1 if zero
+            separatorIdx += (isZero & (1 - found)) * i;
+            found |= isZero;
+        }
+        valid &= found;
+        if (!valid) {
             return null;
         }
-        let i = 2;
-        for (; i < em.length; i++) {
-            if (em[i] === 0x00) {
-                break;
-            }
-        }
-        if (i === em.length) {
-            return null;
-        }
-        return em.slice(i + 1, em.length);
+        return em.slice(separatorIdx + 1, em.length);
     }
 
     static parsePKCS1PublicKey(der) {

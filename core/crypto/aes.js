@@ -526,10 +526,13 @@ export class AESEAXCipher {
         if (computedMac.length !== mac.length) {
             return null;
         }
+        // Constant-time comparison to prevent timing oracle attacks
+        let diff = 0;
         for (let i = 0; i < mac.length; i++) {
-            if (computedMac[i] !== mac[i]) {
-                return null;
-            }
+            diff |= computedMac[i] ^ mac[i];
+        }
+        if (diff !== 0) {
+            return null;
         }
         const res = await this._decryptCTR(encrypted, nCMAC);
         return res;

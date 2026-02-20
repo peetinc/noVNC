@@ -3764,8 +3764,8 @@ export default class RFB extends EventTargetMixin {
         if (this._sock.rQwait("ArdClipboardSend header", 15)) { return false; }
 
         const rQ = this._sock.rQpeekBytes(15);
-        const compressedSize = (rQ[11] << 24) | (rQ[12] << 16) |
-                               (rQ[13] << 8) | rQ[14];
+        const compressedSize = ((rQ[11] << 24) | (rQ[12] << 16) |
+                                (rQ[13] << 8) | rQ[14]) >>> 0;
 
         if (this._sock.rQwait("ArdClipboardSend payload",
                               15 + compressedSize)) { return false; }
