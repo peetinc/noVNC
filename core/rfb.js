@@ -595,7 +595,7 @@ export default class RFB extends EventTargetMixin {
         Log.Info("ARD SessionSelect: User selected command=" + command +
                  " (" + (command === 1 ? "Share Display" : command === 2 ? "Virtual Display" : "Unknown") + ")");
 
-        this._sendSessionCommand(command);
+        this._sendArdSessionCommand(command);
         this._rfbInitState = 'SessionSelectResult';
         this._initMsg(); // Resume protocol handling
     }
@@ -3042,7 +3042,7 @@ export default class RFB extends EventTargetMixin {
         RFB.messages.clientEncodings(this._sock, encs);
     }
 
-    _handleSessionInfo() {
+    _handleArdSessionInfo() {
         // Session Select: SessionInfo (S→C)
         // [u16be bodySize][u16be version=0x0100][u32be allowedCommands][u32 reserved][null-terminated username]
         if (this._sock.rQwait("SessionInfo header", 2)) { return false; }
@@ -3082,7 +3082,7 @@ export default class RFB extends EventTargetMixin {
         // If no console user logged in, auto-connect to console (HDMI output)
         if (!username || username.length === 0) {
             Log.Info("ARD SessionSelect: No console user, auto-connecting to Console (HDMI)");
-            this._sendSessionCommand(1); // 1 = ConnectToConsole
+            this._sendArdSessionCommand(1); // 1 = ConnectToConsole
             this._rfbInitState = 'SessionSelectResult';
         } else {
             // Console user logged in - show picker to choose Share Display vs Virtual Display
@@ -3093,7 +3093,7 @@ export default class RFB extends EventTargetMixin {
         return true;
     }
 
-    _sendSessionCommand(command) {
+    _sendArdSessionCommand(command) {
         // SessionCommand v1: [u16be bodySize=72][u16be version=1][pad4][u8 cmd][pad][char[64] username]
         const bodySize = 72;
         const version = 1;
@@ -3119,7 +3119,7 @@ export default class RFB extends EventTargetMixin {
                  " user=" + (username || "(none)") + ")");
     }
 
-    _handleSessionResult() {
+    _handleArdSessionResult() {
         // SessionResult: [u16be bodySize=80][u16be version=1][u32be status][74 bytes reserved]
         if (this._sock.rQwait("SessionResult header", 2)) { return false; }
 
@@ -3203,7 +3203,7 @@ export default class RFB extends EventTargetMixin {
                 return this._negotiateServerInit();
 
             case 'SessionSelectInfo':
-                return this._handleSessionInfo();
+                return this._handleArdSessionInfo();
 
             case 'SessionSelectWaiting':
                 // Waiting for UI to call selectSessionType()
@@ -3211,7 +3211,7 @@ export default class RFB extends EventTargetMixin {
                 return false;
 
             case 'SessionSelectResult':
-                return this._handleSessionResult();
+                return this._handleArdSessionResult();
 
             default:
                 return this._fail("Unknown init state (state: " +

@@ -56,7 +56,7 @@ const UI = {
     showArdClipboard: true,
     showArdQuality: true,
     showArdDisplaySelect: true,
-    autoSelectDisplay: true,
+    ardAutoSelectDisplay: true,
     ardEncryptionLevel: 2,      // 1=keystroke only, 2=full session
     _ardAutoSelectDone: false,
 
@@ -74,7 +74,7 @@ const UI = {
         // Read optional ARD feature flags from embedding options
         for (const key of ['showArdUserAvatar', 'showArdScreenLock',
             'showArdClipboard', 'showArdQuality', 'showArdDisplaySelect',
-            'autoSelectDisplay', 'ardEncryptionLevel']) {
+            'ardAutoSelectDisplay', 'ardEncryptionLevel']) {
             if (options[key] !== undefined) {
                 UI[key] = options[key];
             }
@@ -2417,7 +2417,7 @@ const UI = {
         const displays = e.detail.displays;
 
         // Auto-select lowest display on multi-monitor Macs
-        if (!UI._ardAutoSelectDone && UI.autoSelectDisplay &&
+        if (!UI._ardAutoSelectDone && UI.ardAutoSelectDisplay &&
             displays && displays.length > 1 && UI.rfb) {
             UI._ardAutoSelectDone = true;
             const lowestId = displays.reduce(
