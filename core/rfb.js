@@ -907,6 +907,24 @@ export default class RFB extends EventTargetMixin {
         clearTimeout(this._mouseMoveTimer);
         clearTimeout(this._authTimer);
         this._authTimer = null;
+
+        // Zero key material and credentials to reduce exposure window
+        if (this._ardDHKey) {
+            this._ardDHKey.fill(0);
+            this._ardDHKey = null;
+        }
+        if (this._ardSessionKey) {
+            this._ardSessionKey.fill(0);
+            this._ardSessionKey = null;
+        }
+        if (this._ardSessionIV) {
+            this._ardSessionIV.fill(0);
+            this._ardSessionIV = null;
+        }
+        this._ardECBCipher = null;
+        this._ardRSAServerKey = null;
+        this._rfbCredentials = {};
+
         Log.Debug("<< RFB.disconnect");
     }
 
@@ -2734,6 +2752,11 @@ export default class RFB extends EventTargetMixin {
         if (status === 0) { // OK
             this._rfbInitState = 'ClientInitialisation';
             Log.Debug('Authentication OK');
+            // Clear credentials now that auth is complete
+            if (this._rfbCredentials) {
+                this._rfbCredentials.username = null;
+                this._rfbCredentials.password = null;
+            }
             return true;
         } else {
             if (this._rfbVersion >= 3.8) {
@@ -4083,6 +4106,17 @@ export default class RFB extends EventTargetMixin {
                 this._FBU.encoding = this._sock.rQshift32();
                 /* Encodings are signed */
                 this._FBU.encoding >>= 0;
+
+                // Reject absurdly large pixel-data rects (DoS protection).
+                // Pseudo-encodings (negative or 1100+) use w/h for metadata.
+                const enc = this._FBU.encoding;
+                if (enc >= 0 && enc <= 1011) {
+                    const pixels = this._FBU.width * this._FBU.height;
+                    if (pixels > 33554432) { // 32M pixels (~128MB RGBA)
+                        return this._fail("Rect too large: " +
+                            this._FBU.width + "x" + this._FBU.height);
+                    }
+                }
             }
 
             if (!this._handleRect()) {
@@ -4367,6 +4401,13 @@ export default class RFB extends EventTargetMixin {
         const imageSize = this._sock.rQshift32() >>> 0;
         const imageEncoding = this._sock.rQshift32() >>> 0; // 6 = PNG
 
+        if (imageSize > 1024 * 1024) {
+            Log.Warn("ArdUserInfo: avatar too large (" + imageSize + " bytes), skipping");
+            this._sock.rQskipBytes(imageSize);
+            this._ardUserAvatarPng = null;
+            return true;
+        }
+
         if (imageSize > 0) {
             if (this._sock.rQwait("ArdUserInfo avatar", imageSize)) { return false; }
             const compressedBytes = this._sock.rQshiftBytes(imageSize);
@@ -4392,7 +4433,10 @@ export default class RFB extends EventTargetMixin {
                 inflator.setInput(null);
             }
 
-            this._ardUserAvatarPng = pngBytes;  // Raw BGRA pixel data, cached for future use
+            if (!pngBytes) {
+                Log.Warn("ArdUserInfo: avatar decompression failed (too large for buffer)");
+            }
+            this._ardUserAvatarPng = pngBytes || null;
         } else {
             this._ardUserAvatarPng = null;
         }
@@ -4437,6 +4481,12 @@ export default class RFB extends EventTargetMixin {
                           (hdr[2] << 8)  |  hdr[3]) >>> 0;
         const dataSize = ((hdr[4] << 24) | (hdr[5] << 16) |
                           (hdr[6] << 8)  |  hdr[7]) >>> 0;
+
+        if (dataSize > 2 * 1024 * 1024) {
+            Log.Warn("ArdCursorAlpha: payload too large (" + dataSize + " bytes), skipping");
+            this._sock.rQskipBytes(8);
+            return true;
+        }
 
         // Wait for complete message: 8-byte header + compressed payload
         if (this._sock.rQwait("ArdCursor payload", 8 + dataSize)) { return false; }
