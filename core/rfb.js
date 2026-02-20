@@ -700,11 +700,10 @@ export default class RFB extends EventTargetMixin {
 
     clipboardPasteFrom(text) {
         if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
-        if (this._rfbAppleARD && !this._ardClipboardSyncEnabled) { return; }
-        if (text === this._ardLastClipboardSent) { return; }
-        this._ardLastClipboardSent = text;
-
         if (this._rfbAppleARD) {
+            if (!this._ardClipboardSyncEnabled) { return; }
+            if (text === this._ardLastClipboardSent) { return; }
+            this._ardLastClipboardSent = text;
             this._sendArdClipboard(text);
             return;
         }
