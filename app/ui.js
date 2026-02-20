@@ -46,9 +46,19 @@ const UI = {
     inhibitReconnect: true,
     reconnectCallback: null,
     reconnectPassword: null,
+    reconnectUsername: null,
     reconnectAttempt: 0,
     reconnectMaxAttempts: 10,
     reconnectEllipsisInterval: null,
+    lastDisconnectTime: 0,
+    showArdUserAvatar: true,
+    showArdScreenLock: true,
+    showArdClipboard: true,
+    showArdQuality: true,
+    showArdDisplaySelect: true,
+    autoSelectDisplay: false,
+    ardEncryptionLevel: 2,      // 1=keystroke only, 2=full session
+    _ardAutoSelectDone: false,
 
     wakeLockManager: new WakeLockManager(),
 
@@ -59,6 +69,29 @@ const UI = {
         }
         if (UI.customSettings.mandatory === undefined) {
             UI.customSettings.mandatory = {};
+        }
+
+        // Read optional ARD sidebar feature flags
+        if (options.showArdUserAvatar !== undefined) {
+            UI.showArdUserAvatar = options.showArdUserAvatar;
+        }
+        if (options.showArdScreenLock !== undefined) {
+            UI.showArdScreenLock = options.showArdScreenLock;
+        }
+        if (options.showArdClipboard !== undefined) {
+            UI.showArdClipboard = options.showArdClipboard;
+        }
+        if (options.showArdQuality !== undefined) {
+            UI.showArdQuality = options.showArdQuality;
+        }
+        if (options.showArdDisplaySelect !== undefined) {
+            UI.showArdDisplaySelect = options.showArdDisplaySelect;
+        }
+        if (options.autoSelectDisplay !== undefined) {
+            UI.autoSelectDisplay = options.autoSelectDisplay;
+        }
+        if (options.ardEncryptionLevel !== undefined) {
+            UI.ardEncryptionLevel = options.ardEncryptionLevel;
         }
 
         // Set up translations
@@ -133,6 +166,17 @@ const UI = {
         UI.addClipboardHandlers();
         UI.addSettingsHandlers();
         UI.updateArdControlSettings(false);  // ensure ARD-only rows start hidden
+
+        // Apply ARD sidebar feature toggles
+        if (!UI.showArdDisplaySelect) {
+            document.getElementById('noVNC_display_select_button')
+                .classList.add('noVNC_hidden');
+        }
+        if (!UI.showArdQuality) {
+            document.getElementById('noVNC_quality_button')
+                .classList.add('noVNC_hidden');
+        }
+
         document.getElementById("noVNC_status")
             .addEventListener('click', UI.hideStatus);
 
@@ -1117,7 +1161,8 @@ const UI = {
                              url.href,
                              { shared: UI.getSetting('shared'),
                                repeaterID: UI.getSetting('repeaterID'),
-                               credentials: { password: password } });
+                               credentials: { password: password },
+                               ardEncryptionLevel: UI.ardEncryptionLevel });
         } catch (exc) {
             Log.Error("Failed to connect to server: " + exc);
             UI.updateVisualState('disconnected');
@@ -1138,6 +1183,7 @@ const UI = {
         UI.rfb.addEventListener("ardcurtainchange", UI.curtainStateChanged);
         UI.rfb.addEventListener("arduserinfo", UI.ardUserInfoChanged);
         UI.rfb.addEventListener("ardconsolestate", UI.ardConsoleStateChanged);
+        UI.rfb.addEventListener("ardencryptionstate", UI.ardEncryptionStateChanged);
         UI.rfb.addEventListener("bell", UI.bell);
         UI.rfb.addEventListener("desktopname", UI.updateDesktopName);
         UI.rfb.clipViewport = UI.getSetting('view_clip');
@@ -1158,6 +1204,10 @@ const UI = {
 
         // Disable automatic reconnecting
         UI.inhibitReconnect = true;
+
+        // Clear cached credentials on manual disconnect
+        UI.reconnectUsername = null;
+        UI.reconnectPassword = null;
 
         UI.updateVisualState('disconnecting');
 
@@ -1198,6 +1248,13 @@ const UI = {
             return;
         }
 
+        // Safety check: ensure old RFB object is fully cleaned up
+        if (UI.rfb) {
+            Log.Warn("Old RFB object still exists, delaying reconnect...");
+            UI.reconnectCallback = setTimeout(UI.reconnect, 200);
+            return;
+        }
+
         UI.connect(null, UI.reconnectPassword);
     },
 
@@ -1209,6 +1266,11 @@ const UI = {
 
         UI.stopReconnectAnimation();
         UI.reconnectAttempt = 0;
+
+        // Clear cached credentials when user cancels reconnect
+        UI.reconnectUsername = null;
+        UI.reconnectPassword = null;
+
         UI.updateVisualState('disconnected');
 
         UI.openControlbar();
@@ -1219,15 +1281,10 @@ const UI = {
         UI.connected = true;
         UI.inhibitReconnect = false;
         UI.reconnectAttempt = 0; // Reset on successful connection
+        UI._ardAutoSelectDone = false; // Allow auto-select on this connection
         UI.stopReconnectAnimation();
 
-        let msg;
-        if (UI.getSetting('encrypt')) {
-            msg = _("Connected (encrypted) to ") + UI.desktopName;
-        } else {
-            msg = _("Connected (unencrypted) to ") + UI.desktopName;
-        }
-        UI.showStatus(msg);
+        UI.showStatus(UI.connectionStatusMessage());
         UI.updateVisualState('connected');
 
         // Adapt modifier key labels for ARD (Mac) connections
@@ -1242,6 +1299,25 @@ const UI = {
 
         // Do this last because it can only be used on rendered elements
         UI.rfb.focus();
+    },
+
+    connectionStatusMessage() {
+        if (UI.rfb && UI.rfb.isAppleARD) {
+            if (UI.rfb.ardEncryptionState === 'full') {
+                return _("Connected (encrypted) to ") + UI.desktopName;
+            }
+            return _("Connected (keystroke encryption) to ") + UI.desktopName;
+        }
+        if (UI.getSetting('encrypt')) {
+            return _("Connected (encrypted) to ") + UI.desktopName;
+        }
+        return _("Connected (unencrypted) to ") + UI.desktopName;
+    },
+
+    ardEncryptionStateChanged(e) {
+        if (UI.connected) {
+            UI.showStatus(UI.connectionStatusMessage());
+        }
     },
 
     disconnectFinished(e) {
@@ -1279,15 +1355,33 @@ const UI = {
         const shouldReconnect = isARD || (UI.getSetting('reconnect', false) === true);
 
         if (shouldReconnect && !UI.inhibitReconnect) {
+            // Circuit breaker: detect rapid reconnect loops
+            const now = Date.now();
+            const timeSinceLastDisconnect = now - UI.lastDisconnectTime;
+            UI.lastDisconnectTime = now;
+
+            if (timeSinceLastDisconnect < 2000 && UI.reconnectAttempt > 0) {
+                Log.Error("Reconnect loop detected (disconnect after " + timeSinceLastDisconnect + "ms). Aborting auto-reconnect.");
+                UI.showStatus(_("Connection unstable, auto-reconnect disabled. Please check server and try manually."), 'error');
+                UI.updateVisualState('disconnected');
+                UI.reconnectAttempt = 0;
+                UI.reconnectUsername = null;
+                UI.reconnectPassword = null;
+                UI.openControlbar();
+                UI.openConnectPanel();
+                return;
+            }
+
             UI.updateVisualState('reconnecting');
 
             // ARD uses Screen Sharing's fast reconnect pattern
             if (isARD) {
                 UI.reconnectAttempt++;
 
-                // Backoff delays: 100ms, 1s, 2s, 5s, 10s, then cap at 10s
+                // Backoff delays: 500ms, 1s, 2s, 5s, 10s, then cap at 10s
+                // First delay is 500ms (not 100ms) to ensure sockify has time to clean up the old connection
                 let delay;
-                if (UI.reconnectAttempt === 1) delay = 100;
+                if (UI.reconnectAttempt === 1) delay = 500;
                 else if (UI.reconnectAttempt === 2) delay = 1000;
                 else if (UI.reconnectAttempt === 3) delay = 2000;
                 else if (UI.reconnectAttempt === 4) delay = 5000;
@@ -1296,6 +1390,11 @@ const UI = {
                 if (UI.reconnectAttempt >= UI.reconnectMaxAttempts) {
                     UI.showStatus(_("Reconnect failed after ") + UI.reconnectAttempt + _(" attempts"), 'error');
                     UI.updateVisualState('disconnected');
+
+                    // Clear cached credentials when reconnect attempts exhausted
+                    UI.reconnectUsername = null;
+                    UI.reconnectPassword = null;
+
                     UI.openControlbar();
                     UI.openConnectPanel();
                     return;
@@ -1423,6 +1522,16 @@ const UI = {
     },
 
     credentials(e) {
+        // Auto-submit cached credentials during reconnect
+        if (UI.reconnectUsername && UI.reconnectPassword && UI.reconnectAttempt > 0) {
+            UI.rfb.sendCredentials({
+                username: UI.reconnectUsername,
+                password: UI.reconnectPassword
+            });
+            Log.Info("Auto-submitting cached credentials for reconnect");
+            return;
+        }
+
         // FIXME: handle more types
 
         document.getElementById("noVNC_username_block").classList.remove("noVNC_hidden");
@@ -1462,6 +1571,7 @@ const UI = {
         inputElemPassword.value = "";
 
         UI.rfb.sendCredentials({ username: username, password: password });
+        UI.reconnectUsername = username;
         UI.reconnectPassword = password;
         document.getElementById('noVNC_credentials_dlg')
             .classList.remove('noVNC_open');
@@ -2044,39 +2154,60 @@ const UI = {
         // Update user avatar in sidebar
         const avatarDiv = document.getElementById('noVNC_ard_user_avatar');
         const avatarImg = document.getElementById('noVNC_ard_user_avatar_img');
+        if (!UI.showArdUserAvatar) {
+            avatarDiv.style.display = 'none';
+            return;
+        }
+
         if (UI.rfb && UI.rfb._ardUserAvatarPng) {
-            // ARD sends raw BGRA pixel data (not PNG despite encoding=6)
-            // Typical 32x32 = 4096 bytes
             const data = UI.rfb._ardUserAvatarPng;
-            const size = Math.sqrt(data.length / 4); // width = height for square avatar
 
-            if (size % 1 === 0) { // Valid square dimensions
-                const canvas = document.createElement('canvas');
-                canvas.width = size;
-                canvas.height = size;
-                const ctx = canvas.getContext('2d', { alpha: true });
+            // Check if it's a PNG file (starts with PNG signature: 89 50 4E 47)
+            const isPNG = data.length > 8 &&
+                         data[0] === 0x89 && data[1] === 0x50 &&
+                         data[2] === 0x4E && data[3] === 0x47;
 
-                // Clear canvas to fully transparent
-                ctx.clearRect(0, 0, size, size);
-
-                const imageData = ctx.createImageData(size, size);
-
-                // Copy RGBA directly (no channel swap needed, force opaque)
-                // Note: Alpha channel exists but can't be used reliably, so force opaque
-                for (let i = 0; i < data.length; i += 4) {
-                    imageData.data[i]     = data[i];     // R
-                    imageData.data[i + 1] = data[i + 1]; // G
-                    imageData.data[i + 2] = data[i + 2]; // B
-                    imageData.data[i + 3] = 255;         // Force fully opaque
-                }
-
-                ctx.putImageData(imageData, 0, 0);
-                avatarImg.src = canvas.toDataURL('image/png');
-                avatarDiv.style.display = 'block';
-                avatarDiv.title = (UI.rfb.ardUsername || 'User') + ' is signed in';
+            if (isPNG) {
+                // It's an actual PNG file - create blob URL
+                const blob = new Blob([data], { type: 'image/png' });
+                const url = URL.createObjectURL(blob);
+                avatarImg.onload = function() {
+                    URL.revokeObjectURL(url);
+                    avatarDiv.style.display = 'block';
+                    avatarDiv.title = (UI.rfb.ardUsername || 'User') + ' is signed in';
+                };
+                avatarImg.onerror = function() {
+                    URL.revokeObjectURL(url);
+                    avatarDiv.style.display = 'none';
+                };
+                avatarImg.src = url;
             } else {
-                console.error("ARD avatar: invalid dimensions, data length=" + data.length);
-                avatarDiv.style.display = 'none';
+                // Raw BGRA pixel data
+                const size = Math.sqrt(data.length / 4);
+                if (size % 1 === 0) { // Valid square dimensions
+                    const canvas = document.createElement('canvas');
+                    canvas.width = size;
+                    canvas.height = size;
+                    const ctx = canvas.getContext('2d', { alpha: false });
+                    const imageData = ctx.createImageData(size, size);
+
+                    // ARD sends BGRA, canvas expects RGBA - swap B and R
+                    // Force alpha to 255 (server sends inconsistent alpha)
+                    for (let i = 0; i < data.length; i += 4) {
+                        imageData.data[i]     = data[i + 2]; // R ← B
+                        imageData.data[i + 1] = data[i + 1]; // G ← G
+                        imageData.data[i + 2] = data[i];     // B ← R
+                        imageData.data[i + 3] = 255;         // Force opaque
+                    }
+
+                    ctx.putImageData(imageData, 0, 0);
+                    avatarImg.src = canvas.toDataURL('image/png');
+                    avatarDiv.style.display = 'block';
+                    avatarDiv.title = (UI.rfb.ardUsername || 'User') + ' is signed in';
+                } else {
+                    console.error("ARD avatar: invalid dimensions, data length=" + data.length);
+                    avatarDiv.style.display = 'none';
+                }
             }
         } else {
             avatarDiv.style.display = 'none';
@@ -2091,8 +2222,8 @@ const UI = {
 
     updateCurtainButton(isARD) {
         const btn = document.getElementById('noVNC_curtain_button');
-        btn.classList.toggle('noVNC_hidden', !isARD);
-        if (!isARD) {
+        btn.classList.toggle('noVNC_hidden', !isARD || !UI.showArdScreenLock);
+        if (!isARD || !UI.showArdScreenLock) {
             btn.disabled = true;
             UI.closeCurtainPanel();
             return;
@@ -2133,15 +2264,16 @@ const UI = {
 
     updateClipboardButtons(connected) {
         const isARD = connected && UI.rfb && UI.rfb.isAppleARD;
+        const showClip = isARD && UI.showArdClipboard;
         const syncBtn   = document.getElementById('noVNC_clipboard_sync_button');
         const sendBtn   = document.getElementById('noVNC_clipboard_send_button');
         const getBtn    = document.getElementById('noVNC_clipboard_get_button');
 
         // Only show the ARD clipboard buttons when connected to macOS;
         // hide the legacy clipboard panel button when ARD takes over.
-        syncBtn.classList.toggle('noVNC_hidden', !isARD);
-        sendBtn.classList.toggle('noVNC_hidden', !isARD);
-        getBtn.classList.toggle('noVNC_hidden', !isARD);
+        syncBtn.classList.toggle('noVNC_hidden', !showClip);
+        sendBtn.classList.toggle('noVNC_hidden', !showClip);
+        getBtn.classList.toggle('noVNC_hidden', !showClip);
         document.getElementById('noVNC_clipboard_button')
             .classList.toggle('noVNC_hidden', !!isARD);
 
@@ -2274,6 +2406,21 @@ const UI = {
 
     ardDisplayListUpdated(e) {
         const displays = e.detail.displays;
+
+        // Auto-select lowest display on multi-monitor Macs
+        if (!UI._ardAutoSelectDone && UI.autoSelectDisplay &&
+            displays && displays.length > 1 && UI.rfb) {
+            UI._ardAutoSelectDone = true;
+            const lowestId = displays.reduce(
+                (min, d) => d.id < min ? d.id : min, displays[0].id);
+            // Wait 100ms for the All canvas to finish loading
+            setTimeout(() => {
+                if (UI.rfb) {
+                    Log.Info("ARD auto-select: switching to display " + lowestId);
+                    UI.rfb.selectDisplay(0, lowestId);
+                }
+            }, 100);
+        }
 
         const container = document.getElementById('noVNC_display_select_buttons');
         const btn = document.getElementById('noVNC_display_select_button');

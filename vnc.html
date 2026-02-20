@@ -94,8 +94,26 @@
 
         // See docs/EMBEDDING.md for a list of possible settings.
 
+        // ── ARD sidebar feature toggles ──────────────────────
+        // Set any to false to hide that control from the sidebar.
+        const showArdUserAvatar    = true;  // macOS user icon + login tooltip
+        const showArdScreenLock    = true;  // curtain / screen-lock button
+        const showArdClipboard     = true;  // clipboard buttons (if false, auto-sync stays on)
+        const showArdQuality       = true;  // quality preset button + slider
+        const showArdDisplaySelect = true;  // multi-display selector
+        const autoSelectDisplay    = true;  // auto-switch to lowest display on multi-monitor Macs
+        const ardEncryptionLevel   = 2;     // 1=keystroke only, 2=full session
+        // ────────────────────────────────────────────────────
+
         UI.start({ settings: { defaults: defaults,
-                               mandatory: mandatory } });
+                               mandatory: mandatory },
+                   showArdUserAvatar: showArdUserAvatar,
+                   showArdScreenLock: showArdScreenLock,
+                   showArdClipboard: showArdClipboard,
+                   showArdQuality: showArdQuality,
+                   showArdDisplaySelect: showArdDisplaySelect,
+                   autoSelectDisplay: autoSelectDisplay,
+                   ardEncryptionLevel: ardEncryptionLevel });
     </script>
 </head>
 
@@ -117,7 +135,7 @@
 
             <div class="noVNC_scroll">
 
-            <!-- <h1 class="noVNC_logo" translate="no"><span>no</span><br>VNC</h1> -->
+            <h1 class="noVNC_logo" translate="no"><span>no</span><br>VNC</h1>
 
             <!-- ARD user avatar -->
             <div id="noVNC_ard_user_avatar" class="noVNC_button" style="display: none; padding: 4px; overflow: hidden;" title="">
@@ -428,7 +446,7 @@
     <!-- Connect button -->
     <div class="noVNC_center">
         <div id="noVNC_connect_dlg">
-            <!-- <p class="noVNC_logo" translate="no"><span>no</span>VNC</p> -->
+            <p class="noVNC_logo" translate="no"><span>no</span>VNC</p>
             <div>
                 <button id="noVNC_connect_button">
                     <img alt="" src="app/images/connect.svg"> Connect

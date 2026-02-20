@@ -146,6 +146,8 @@ export default class RFB extends EventTargetMixin {
         this._ardSessionIV = null;
         this._ardPendingEncryption = false;
         this._ardEncryptionEnabled = false;
+        this._ardEncryptionLevel = options.ardEncryptionLevel !== undefined
+            ? options.ardEncryptionLevel : 2; // 1=keystroke only, 2=full session
         this._ardRSATunnelStage = 0;
         this._ardRSAServerKey = null;
         this._ardQualityPreset = 'thousands';
@@ -601,6 +603,14 @@ export default class RFB extends EventTargetMixin {
     get ardCombineAllDisplays() { return this._ardCombineAllDisplays; }
     get ardSelectedDisplayId() { return this._ardSelectedDisplayId; }
 
+    // ARD encryption state: 'keystroke' | 'full'
+    //  - 'keystroke': keystrokes encrypted via AES-128-ECB (msg type 0x10)
+    //  - 'full': entire stream encrypted via AES-128-CBC (encoding 1103)
+    get ardEncryptionState() {
+        if (this._ardEncryptionEnabled) { return 'full'; }
+        return 'keystroke';
+    }
+
     sendCtrlAltDel() {
         if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
         Log.Info("Sending Ctrl-Alt-Del");
@@ -637,7 +647,7 @@ export default class RFB extends EventTargetMixin {
         }
 
         // ARD servers expect keystrokes wrapped in AES-128-ECB encryption
-        // (only before stream encryption is active)
+        // (only before full stream encryption is active)
         if (this._rfbAppleARD && this._ardDHKey && !this._ardEncryptionEnabled) {
             const cipher = this._getArdECBCipher();
             const payload = this._buildEncryptedKeyPayload(keysym || 0, down);
@@ -2147,6 +2157,9 @@ export default class RFB extends EventTargetMixin {
         this._ardEncryptionEnabled = true;
         Log.Info("ARD: stream encryption enabled");
 
+        this.dispatchEvent(new CustomEvent("ardencryptionstate",
+            { detail: { state: 'full' } }));
+
         // Any data remaining in the rQ after FBU processing is encrypted
         // server data that was buffered before encryption was enabled.
         // Re-route it through the decryption layer.
@@ -2787,7 +2800,7 @@ export default class RFB extends EventTargetMixin {
                                   (name.charCodeAt(3) << 16) |
                                   (name.charCodeAt(4) << 8)  |
                                    name.charCodeAt(5)) >>> 0;
-            this._ardServerFlags = serverFlags;  // Save for session select check
+            this._ardServerFlags = serverFlags;
             const accessRights = ((name.charCodeAt(6) << 24) |
                                    (name.charCodeAt(7) << 16) |
                                    (name.charCodeAt(8) << 8)  |
@@ -2819,6 +2832,9 @@ export default class RFB extends EventTargetMixin {
                      " showObserver=" + ((accessRights & 0x40000000) !== 0) +
                      " encrypted=" + ((accessRights & 0x80000000) !== 0) + ")" +
                      "\nARD ServerInit: capabilityBitmap=[" + capHex + "]");
+            // Bit 31 of accessRights = auth was encrypted (always true for
+            // RSATunnel type 33); does NOT indicate stream encryption is required.
+
             name = name.substring(name.lastIndexOf('\x00') + 1);
         }
 
@@ -2915,11 +2931,12 @@ export default class RFB extends EventTargetMixin {
             Log.Info("ARD init [7/10] SetEncodings(repeat)");
             this._sendEncodings();
 
-            if (this._ardDHKey) {
+            if (this._ardDHKey && this._ardEncryptionLevel >= 2) {
                 Log.Info("ARD init [8/10] SetEncryption(request)");
                 RFB.messages.ardSetEncryption(this._sock, 1);
             } else {
-                Log.Info("ARD init [8/10] SetEncryption skipped (no DH key)");
+                Log.Info("ARD init [8/10] SetEncryption skipped" +
+                         (!this._ardDHKey ? " (no DH key)" : " (level=" + this._ardEncryptionLevel + ")"));
             }
 
             Log.Info("ARD init [9/11] FBUpdateRequest(full)");
@@ -2972,7 +2989,9 @@ export default class RFB extends EventTargetMixin {
             encs.push(encodings.pseudoEncodingDesktopSize);
             encs.push(encodings.pseudoEncodingArdDisplayInfo);
             encs.push(encodings.pseudoEncodingArdDisplayInfo2);
-            encs.push(encodings.pseudoEncodingArdSessionEncryption);
+            if (this._ardEncryptionLevel >= 2) {
+                encs.push(encodings.pseudoEncodingArdSessionEncryption);
+            }
             encs.push(encodings.pseudoEncodingArdUserInfo);
             RFB.messages.clientEncodings(this._sock, encs);
             return;
@@ -3148,29 +3167,37 @@ export default class RFB extends EventTargetMixin {
             Log.Info("ARD init [7/10] SetEncodings(repeat)");
             this._sendEncodings();
 
-            if (this._ardDHKey) {
+            if (this._ardDHKey && this._ardEncryptionLevel >= 2) {
                 Log.Info("ARD init [8/10] SetEncryption(request)");
                 RFB.messages.ardSetEncryption(this._sock, 1);
             } else {
-                Log.Info("ARD init [8/10] SetEncryption skipped (no DH key)");
+                Log.Info("ARD init [8/10] SetEncryption skipped" +
+                         (!this._ardDHKey ? " (no DH key)" : " (level=" + this._ardEncryptionLevel + ")"));
             }
 
-            Log.Info("ARD init [9/11] FBUpdateRequest(full)");
-            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
-                                         this._fbWidth, this._fbHeight);
-            Log.Info("ARD init [10/11] AutoFBUpdate(enable)");
-            this._sendArdAutoFBUpdate(1, 0, 0,
-                                      this._fbWidth, this._fbHeight);
-            this._sock.flush();
-            setTimeout(() => {
-                if (this._rfbConnectionState !== 'connected') return;
-                Log.Info("ARD init [11/11] FBUpdateRequest+AutoFBUpdate(delayed 50ms)");
+            // Skip initial FBUpdateRequest if dimensions are 0x0 (session select case)
+            // The server will send DisplayInfo2 with real dimensions, which will trigger updates
+            if (this._fbWidth > 0 && this._fbHeight > 0) {
+                Log.Info("ARD init [9/11] FBUpdateRequest(full)");
                 RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
                                              this._fbWidth, this._fbHeight);
+                Log.Info("ARD init [10/11] AutoFBUpdate(enable)");
                 this._sendArdAutoFBUpdate(1, 0, 0,
                                           this._fbWidth, this._fbHeight);
                 this._sock.flush();
-            }, 50);
+                setTimeout(() => {
+                    if (this._rfbConnectionState !== 'connected') return;
+                    Log.Info("ARD init [11/11] FBUpdateRequest+AutoFBUpdate(delayed 50ms)");
+                    RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                                 this._fbWidth, this._fbHeight);
+                    this._sendArdAutoFBUpdate(1, 0, 0,
+                                              this._fbWidth, this._fbHeight);
+                    this._sock.flush();
+                }, 50);
+            } else {
+                Log.Info("ARD init [9/11] Skipping FBUpdateRequest (waiting for DisplayInfo2 with real dimensions)");
+                this._sock.flush();
+            }
 
             // Set default arrow cursor and track first-FBU cursor delivery
             this._ardActiveCursor = { type: 'system', id: 0 };
