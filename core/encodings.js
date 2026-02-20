@@ -66,6 +66,7 @@ export function encodingName(num) {
         case encodings.encodingArdThousands: return "ArdThousands";
         case encodings.pseudoEncodingArdCursorPos: return "ArdCursorPos";
         case encodings.pseudoEncodingArdDisplayInfo: return "ArdDisplayInfo";
+        case encodings.pseudoEncodingArdUserInfo: return "ArdUserInfo";
         case encodings.pseudoEncodingArdSessionEncryption: return "ArdSessionEncryption";
         case encodings.pseudoEncodingArdCursorAlpha: return "ArdCursorAlpha";
         case encodings.pseudoEncodingArdDisplayInfo2: return "ArdDisplayInfo2";

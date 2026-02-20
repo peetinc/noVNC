@@ -694,9 +694,6 @@ html {
 }
 
 /* ARD clipboard buttons */
-/* :root:not(.noVNC_connected) .noVNC_clipboard_btn {
-    display: none;
-} */
 .noVNC_clipboard_btn {
     background: none;
     border: none;

@@ -533,7 +533,7 @@ export default class Websock {
                     Log.Error("ARD: SHA-1 mismatch on encrypted packet " +
                               this._encRecvSeq + " — disconnecting");
                     this.close();
-                    return;
+                    return false;
                 }
             }
 

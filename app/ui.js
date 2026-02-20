@@ -56,7 +56,7 @@ const UI = {
     showArdClipboard: true,
     showArdQuality: true,
     showArdDisplaySelect: true,
-    autoSelectDisplay: false,
+    autoSelectDisplay: true,
     ardEncryptionLevel: 2,      // 1=keystroke only, 2=full session
     _ardAutoSelectDone: false,
 
@@ -2221,7 +2221,7 @@ const UI = {
                     avatarDiv.style.display = 'block';
                     avatarDiv.title = (UI.rfb.ardUsername || 'User') + ' is signed in';
                 } else {
-                    console.error("ARD avatar: invalid dimensions, data length=" + data.length);
+                    Log.Error("ARD avatar: invalid dimensions, data length=" + data.length);
                     avatarDiv.style.display = 'none';
                 }
             }

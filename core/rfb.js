@@ -183,6 +183,7 @@ export default class RFB extends EventTargetMixin {
         this._ardServerFlags = 0;              // Extended ServerInit session flags
         this._ardSessionSelectNeeded = false;  // Session Select required before FBUs
         this._ardSessionSelectConsoleUser = ''; // User currently at console
+        this._ardFreezeWatchdog = null;        // setInterval id for freeze detection
         this._rfbVeNCryptState = 0;
         this._rfbXvpVer = 0;
 
@@ -4074,7 +4075,16 @@ export default class RFB extends EventTargetMixin {
                     Log.Info("ARD: server re-handshake — resetting to Security");
                     this._sock.sQpushString("RFB 003.889\n");
                     this._sock.flush();
-                    // Reset encryption and auth state for fresh re-auth
+                    // Zero key material before resetting for fresh re-auth
+                    if (this._ardDHKey) {
+                        this._ardDHKey.fill(0);
+                    }
+                    if (this._ardSessionKey) {
+                        this._ardSessionKey.fill(0);
+                    }
+                    if (this._ardSessionIV) {
+                        this._ardSessionIV.fill(0);
+                    }
                     this._ardDHKey = null;
                     this._ardECBCipher = null;
                     this._ardSessionKey = null;
@@ -4474,7 +4484,6 @@ export default class RFB extends EventTargetMixin {
             this._ardUserAvatarPng = null;
         }
 
-        const prevUsername = this._ardUsername;
         this._ardUsername = username;
 
         Log.Info("ARD UserInfo: username=" + (username || "(none — login window)") +
