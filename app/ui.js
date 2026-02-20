@@ -1285,12 +1285,13 @@ const UI = {
             if (isARD) {
                 UI.reconnectAttempt++;
 
-                // Backoff delays matching Screen Sharing: 100ms, 2s, 5s, 10s, 15s, ...
+                // Backoff delays: 100ms, 1s, 2s, 5s, 10s, then cap at 10s
                 let delay;
                 if (UI.reconnectAttempt === 1) delay = 100;
-                else if (UI.reconnectAttempt === 2) delay = 2000;
-                else if (UI.reconnectAttempt === 3) delay = 5000;
-                else delay = Math.min(10000 + (UI.reconnectAttempt - 4) * 5000, 30000);
+                else if (UI.reconnectAttempt === 2) delay = 1000;
+                else if (UI.reconnectAttempt === 3) delay = 2000;
+                else if (UI.reconnectAttempt === 4) delay = 5000;
+                else delay = 10000; // Cap at 10s for remaining attempts
 
                 if (UI.reconnectAttempt >= UI.reconnectMaxAttempts) {
                     UI.showStatus(_("Reconnect failed after ") + UI.reconnectAttempt + _(" attempts"), 'error');
