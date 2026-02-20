@@ -9,40 +9,17 @@
  * 4-bit grayscale (16 levels), zlib compressed.
  */
 
-import Inflator from "../inflator.js";
+import ArdZlibDecoder from "./ardzlib.js";
 
-export default class ArdGray16Decoder {
-    constructor() {
-        this._zlib = new Inflator();
-        this._length = 0;
+export default class ArdGray16Decoder extends ArdZlibDecoder {
+    get _encodingName() { return "ArdGray16"; }
+
+    _inflateSize(width, height) {
+        return Math.ceil(width / 2) * height;
     }
 
-    decodeRect(x, y, width, height, sock, display, depth) {
-        if ((width === 0) || (height === 0)) {
-            return true;
-        }
-
-        if (this._length === 0) {
-            if (sock.rQwait("ArdGray16", 4)) {
-                return false;
-            }
-
-            this._length = sock.rQshift32();
-        }
-
-        if (sock.rQwait("ArdGray16", this._length)) {
-            return false;
-        }
-
-        let data = new Uint8Array(sock.rQshiftBytes(this._length, false));
-        this._length = 0;
-
+    _convertPixels(gray4, width, height) {
         const rowBytes = Math.ceil(width / 2);
-        this._zlib.setInput(data);
-        const gray4 = this._zlib.inflate(rowBytes * height);
-        this._zlib.setInput(null);
-
-        // Convert 4-bit grayscale (2 pixels per byte) to RGBA
         const pixels = new Uint8Array(width * height * 4);
         let pIdx = 0;
         for (let row = 0; row < height; row++) {
@@ -57,9 +34,6 @@ export default class ArdGray16Decoder {
                 pixels[pIdx++] = 255;
             }
         }
-
-        display.blitImage(x, y, width, height, pixels, 0);
-
-        return true;
+        return pixels;
     }
 }

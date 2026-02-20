@@ -71,27 +71,13 @@ const UI = {
             UI.customSettings.mandatory = {};
         }
 
-        // Read optional ARD sidebar feature flags
-        if (options.showArdUserAvatar !== undefined) {
-            UI.showArdUserAvatar = options.showArdUserAvatar;
-        }
-        if (options.showArdScreenLock !== undefined) {
-            UI.showArdScreenLock = options.showArdScreenLock;
-        }
-        if (options.showArdClipboard !== undefined) {
-            UI.showArdClipboard = options.showArdClipboard;
-        }
-        if (options.showArdQuality !== undefined) {
-            UI.showArdQuality = options.showArdQuality;
-        }
-        if (options.showArdDisplaySelect !== undefined) {
-            UI.showArdDisplaySelect = options.showArdDisplaySelect;
-        }
-        if (options.autoSelectDisplay !== undefined) {
-            UI.autoSelectDisplay = options.autoSelectDisplay;
-        }
-        if (options.ardEncryptionLevel !== undefined) {
-            UI.ardEncryptionLevel = options.ardEncryptionLevel;
+        // Read optional ARD feature flags from embedding options
+        for (const key of ['showArdUserAvatar', 'showArdScreenLock',
+            'showArdClipboard', 'showArdQuality', 'showArdDisplaySelect',
+            'autoSelectDisplay', 'ardEncryptionLevel']) {
+            if (options[key] !== undefined) {
+                UI[key] = options[key];
+            }
         }
 
         // Set up translations
@@ -165,7 +151,7 @@ const UI = {
         UI.addConnectionControlHandlers();
         UI.addClipboardHandlers();
         UI.addSettingsHandlers();
-        UI.updateArdControlSettings(false);  // ensure ARD-only rows start hidden
+        UI.updateArdControlSettings();  // ensure ARD-only rows start hidden
 
         // Apply ARD sidebar feature toggles
         if (!UI.showArdDisplaySelect) {
@@ -1206,8 +1192,7 @@ const UI = {
         UI.inhibitReconnect = true;
 
         // Clear cached credentials on manual disconnect
-        UI.reconnectUsername = null;
-        UI.reconnectPassword = null;
+        UI.clearCachedCredentials();
 
         UI.updateVisualState('disconnecting');
 
@@ -1240,6 +1225,11 @@ const UI = {
         }
     },
 
+    clearCachedCredentials() {
+        UI.reconnectUsername = null;
+        UI.reconnectPassword = null;
+    },
+
     reconnect() {
         UI.reconnectCallback = null;
 
@@ -1268,8 +1258,7 @@ const UI = {
         UI.reconnectAttempt = 0;
 
         // Clear cached credentials when user cancels reconnect
-        UI.reconnectUsername = null;
-        UI.reconnectPassword = null;
+        UI.clearCachedCredentials();
 
         UI.updateVisualState('disconnected');
 
@@ -1287,14 +1276,16 @@ const UI = {
         UI.showStatus(UI.connectionStatusMessage());
         UI.updateVisualState('connected');
 
+        const isARD = UI.rfb.isAppleARD;
+
         // Adapt modifier key labels for ARD (Mac) connections
-        if (UI.rfb && UI.rfb.isAppleARD) {
+        if (isARD) {
             UI.applyMacKeyLabels();
         }
 
         UI.updateClipboardButtons(true);
-        UI.updateArdControlSettings(!!(UI.rfb && UI.rfb.isAppleARD));
-        UI.updateCurtainButton(!!(UI.rfb && UI.rfb.isAppleARD));
+        UI.updateArdControlSettings();
+        UI.updateCurtainButton();
         UI.updateBeforeUnload();
 
         // Do this last because it can only be used on rendered elements
@@ -1329,8 +1320,8 @@ const UI = {
         // UI.disconnect() won't be used in those cases.
         UI.connected = false;
         UI.updateClipboardButtons(false);
-        UI.updateArdControlSettings(false);
-        UI.updateCurtainButton(false);
+        UI.updateArdControlSettings();
+        UI.updateCurtainButton();
 
         // Hide ARD user avatar
         const avatarDiv = document.getElementById('noVNC_ard_user_avatar');
@@ -2145,11 +2136,11 @@ const UI = {
     },
 
     curtainStateChanged(e) {
-        UI.updateCurtainButton(!!(UI.rfb && UI.rfb.isAppleARD));
+        UI.updateCurtainButton();
     },
 
     ardUserInfoChanged(e) {
-        UI.updateCurtainButton(!!(UI.rfb && UI.rfb.isAppleARD));
+        UI.updateCurtainButton();
 
         // Update user avatar in sidebar
         const avatarDiv = document.getElementById('noVNC_ard_user_avatar');
@@ -2233,10 +2224,11 @@ const UI = {
     },
 
     ardConsoleStateChanged(e) {
-        UI.updateCurtainButton(!!(UI.rfb && UI.rfb.isAppleARD));
+        UI.updateCurtainButton();
     },
 
-    updateCurtainButton(isARD) {
+    updateCurtainButton() {
+        const isARD = !!(UI.rfb && UI.rfb.isAppleARD);
         const btn = document.getElementById('noVNC_curtain_button');
         btn.classList.toggle('noVNC_hidden', !isARD || !UI.showArdScreenLock);
         if (!isARD || !UI.showArdScreenLock) {
@@ -2336,7 +2328,8 @@ const UI = {
 
     // Show or hide ARD-specific control mode settings and set the initial
     // mode based on the current Shared mode / View only toggle state.
-    updateArdControlSettings(isARD) {
+    updateArdControlSettings() {
+        const isARD = !!(UI.rfb && UI.rfb.isAppleARD);
         document.getElementById('noVNC_ard_exclusive_row')
             .classList.toggle('noVNC_hidden', !isARD);
 

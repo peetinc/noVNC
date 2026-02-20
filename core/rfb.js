@@ -2964,61 +2964,7 @@ export default class RFB extends EventTargetMixin {
                 return true;
             }
 
-            Log.Info("ARD init: fb=" + this._fbWidth + "x" + this._fbHeight +
-                     " name=" + this._fbName);
-            // ARD init sequence (Phase 5 + 6):
-            // ViewerInfo → SetMode → SetDisplay → AutoPasteboard
-            // → SetEncodings → PixelFormat → SetEncodings → SetEncryption
-            // → FBUpdateRequest(incremental=0) → AutoFBUpdate
-            // Native macOS client sends SetEncodings twice: once before
-            // and once after SetPixelFormat.
-            Log.Info("ARD init [1/10] ViewerInfo");
-            this._sendArdViewerInfo();
-            Log.Info("ARD init [2/10] SetMode(Control)");
-            this._ardControlMode = 1;      // default: Control (shared)
-            this._sendArdSetMode(1);
-            Log.Info("ARD init [3/10] SetDisplay(combineAll=1, All)");
-            this._sendArdSetDisplay();
-            Log.Info("ARD init [4/10] AutoPasteboard(1)");
-            this._sendArdAutoPasteboard(1);
-            Log.Info("ARD init [5/10] SetEncodings(preset=" + this._ardQualityPreset + ")");
-            this._sendEncodings();
-            Log.Info("ARD init [6/10] PixelFormat(32bpp depth=" + this._fbDepth + ")");
-            RFB.messages.pixelFormat(this._sock, this._fbDepth, true, 16, 8, 0);
-            Log.Info("ARD init [7/10] SetEncodings(repeat)");
-            this._sendEncodings();
-
-            if (this._ardDHKey && this._ardEncryptionLevel >= 2) {
-                Log.Info("ARD init [8/10] SetEncryption(request)");
-                RFB.messages.ardSetEncryption(this._sock, 1);
-            } else {
-                Log.Info("ARD init [8/10] SetEncryption skipped" +
-                         (!this._ardDHKey ? " (no DH key)" : " (level=" + this._ardEncryptionLevel + ")"));
-            }
-
-            Log.Info("ARD init [9/11] FBUpdateRequest(full)");
-            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
-                                         this._fbWidth, this._fbHeight);
-            Log.Info("ARD init [10/11] AutoFBUpdate(enable)");
-            this._sendArdAutoFBUpdate(1, 0, 0,
-                                      this._fbWidth, this._fbHeight);
-            this._sock.flush();
-            setTimeout(() => {
-                if (this._rfbConnectionState !== 'connected') return;
-                Log.Info("ARD init [11/11] FBUpdateRequest+AutoFBUpdate(delayed 50ms)");
-                RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
-                                             this._fbWidth, this._fbHeight);
-                this._sendArdAutoFBUpdate(1, 0, 0,
-                                          this._fbWidth, this._fbHeight);
-                this._sock.flush();
-            }, 50);
-
-            // Set default arrow cursor and track first-FBU cursor delivery
-            this._ardActiveCursor = { type: 'system', id: 0 };
-            this._setArdSystemCursor(0);
-            this._ardGotCursor = false;
-            this._ardFirstDisplayInfo = true;
-            this._ardPhase3Pending = false;
+            this._sendArdInitSequence();
         } else {
             RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
             this._sendEncodings();
@@ -3205,63 +3151,7 @@ export default class RFB extends EventTargetMixin {
             Log.Info("ARD SessionResult: session granted, starting ARD init");
             this._ardSessionSelectNeeded = false;
 
-            // Now proceed with normal ARD init sequence
-            Log.Info("ARD init: fb=" + this._fbWidth + "x" + this._fbHeight +
-                     " name=" + this._fbName);
-            Log.Info("ARD init [1/10] ViewerInfo");
-            this._sendArdViewerInfo();
-            Log.Info("ARD init [2/10] SetMode(Control)");
-            this._ardControlMode = 1;
-            this._sendArdSetMode(1);
-            Log.Info("ARD init [3/10] SetDisplay(combineAll=1, All)");
-            this._sendArdSetDisplay();
-            Log.Info("ARD init [4/10] AutoPasteboard(1)");
-            this._sendArdAutoPasteboard(1);
-            Log.Info("ARD init [5/10] SetEncodings(preset=" + this._ardQualityPreset + ")");
-            this._sendEncodings();
-            Log.Info("ARD init [6/10] PixelFormat(32bpp depth=" + this._fbDepth + ")");
-            RFB.messages.pixelFormat(this._sock, this._fbDepth, true, 16, 8, 0);
-            Log.Info("ARD init [7/10] SetEncodings(repeat)");
-            this._sendEncodings();
-
-            if (this._ardDHKey && this._ardEncryptionLevel >= 2) {
-                Log.Info("ARD init [8/10] SetEncryption(request)");
-                RFB.messages.ardSetEncryption(this._sock, 1);
-            } else {
-                Log.Info("ARD init [8/10] SetEncryption skipped" +
-                         (!this._ardDHKey ? " (no DH key)" : " (level=" + this._ardEncryptionLevel + ")"));
-            }
-
-            // Skip initial FBUpdateRequest if dimensions are 0x0 (session select case)
-            // The server will send DisplayInfo2 with real dimensions, which will trigger updates
-            if (this._fbWidth > 0 && this._fbHeight > 0) {
-                Log.Info("ARD init [9/11] FBUpdateRequest(full)");
-                RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
-                                             this._fbWidth, this._fbHeight);
-                Log.Info("ARD init [10/11] AutoFBUpdate(enable)");
-                this._sendArdAutoFBUpdate(1, 0, 0,
-                                          this._fbWidth, this._fbHeight);
-                this._sock.flush();
-                setTimeout(() => {
-                    if (this._rfbConnectionState !== 'connected') return;
-                    Log.Info("ARD init [11/11] FBUpdateRequest+AutoFBUpdate(delayed 50ms)");
-                    RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
-                                                 this._fbWidth, this._fbHeight);
-                    this._sendArdAutoFBUpdate(1, 0, 0,
-                                              this._fbWidth, this._fbHeight);
-                    this._sock.flush();
-                }, 50);
-            } else {
-                Log.Info("ARD init [9/11] Skipping FBUpdateRequest (waiting for DisplayInfo2 with real dimensions)");
-                this._sock.flush();
-            }
-
-            // Set default arrow cursor and track first-FBU cursor delivery
-            this._ardActiveCursor = { type: 'system', id: 0 };
-            this._setArdSystemCursor(0);
-            this._ardGotCursor = false;
-            this._ardFirstDisplayInfo = true;
-            this._ardPhase3Pending = false;
+            this._sendArdInitSequence();
 
             this._updateConnectionState('connected');
             return true;
@@ -3698,6 +3588,43 @@ export default class RFB extends EventTargetMixin {
         this._sock.sQpush16(y);         // region y
         this._sock.sQpush16(w);         // region width
         this._sock.sQpush16(h);         // region height
+    }
+
+    // ARD init sequence (Phase 5 + 6):
+    // ViewerInfo → SetMode → SetDisplay → AutoPasteboard
+    // → SetEncodings → PixelFormat → SetEncodings → SetEncryption
+    // → FBUpdateRequest → AutoFBUpdate
+    // Native macOS client sends SetEncodings twice: once before
+    // and once after SetPixelFormat.
+    _sendArdInitSequence() {
+        Log.Info("ARD init: fb=" + this._fbWidth + "x" + this._fbHeight +
+                 " name=" + this._fbName);
+
+        this._sendArdViewerInfo();
+        this._ardControlMode = 1;      // default: Control (shared)
+        this._sendArdSetMode(1);
+        this._sendArdSetDisplay();
+        this._sendArdAutoPasteboard(1);
+        this._sendEncodings();
+        RFB.messages.pixelFormat(this._sock, this._fbDepth, true, 16, 8, 0);
+        this._sendEncodings();
+
+        if (this._ardDHKey && this._ardEncryptionLevel >= 2) {
+            RFB.messages.ardSetEncryption(this._sock, 1);
+        }
+
+        if (this._fbWidth > 0 && this._fbHeight > 0) {
+            this._requestArdFullUpdate(this._fbWidth, this._fbHeight);
+        } else {
+            this._sock.flush();
+        }
+
+        // Set default arrow cursor and track first-FBU cursor delivery
+        this._ardActiveCursor = { type: 'system', id: 0 };
+        this._setArdSystemCursor(0);
+        this._ardGotCursor = false;
+        this._ardFirstDisplayInfo = true;
+        this._ardPhase3Pending = false;
     }
 
     // Request a full (non-incremental) framebuffer update and enable

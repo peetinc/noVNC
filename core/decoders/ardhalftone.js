@@ -9,40 +9,17 @@
  * 1-bit monochrome (halftone dithered), zlib compressed.
  */
 
-import Inflator from "../inflator.js";
+import ArdZlibDecoder from "./ardzlib.js";
 
-export default class ArdHalftoneDecoder {
-    constructor() {
-        this._zlib = new Inflator();
-        this._length = 0;
+export default class ArdHalftoneDecoder extends ArdZlibDecoder {
+    get _encodingName() { return "ArdHalftone"; }
+
+    _inflateSize(width, height) {
+        return Math.ceil(width / 8) * height;
     }
 
-    decodeRect(x, y, width, height, sock, display, depth) {
-        if ((width === 0) || (height === 0)) {
-            return true;
-        }
-
-        if (this._length === 0) {
-            if (sock.rQwait("ArdHalftone", 4)) {
-                return false;
-            }
-
-            this._length = sock.rQshift32();
-        }
-
-        if (sock.rQwait("ArdHalftone", this._length)) {
-            return false;
-        }
-
-        let data = new Uint8Array(sock.rQshiftBytes(this._length, false));
-        this._length = 0;
-
+    _convertPixels(mono, width, height) {
         const rowBytes = Math.ceil(width / 8);
-        this._zlib.setInput(data);
-        const mono = this._zlib.inflate(rowBytes * height);
-        this._zlib.setInput(null);
-
-        // Convert 1-bit monochrome (MSB first) to RGBA
         const pixels = new Uint8Array(width * height * 4);
         let pIdx = 0;
         for (let row = 0; row < height; row++) {
@@ -56,9 +33,6 @@ export default class ArdHalftoneDecoder {
                 pixels[pIdx++] = 255;
             }
         }
-
-        display.blitImage(x, y, width, height, pixels, 0);
-
-        return true;
+        return pixels;
     }
 }
